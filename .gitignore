@@ -1,0 +1,56 @@
+# ───── Python ─────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ───── uv / poetry lock caches ─────
+uv.lock.bak
+
+# ───── Knowledge base data (keep samples, ignore bulk) ─────
+data/raw/*
+!data/raw/.gitkeep
+data/index/*
+!data/index/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+
+# ───── Environment files (never commit secrets) ─────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ───── Node / TS (optional frontend later) ─────
+node_modules/
+dist/
+.next/
+.parcel-cache/
+.pnpm-store/
+
+# ───── IDEs & OS ─────
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+
+# ───── Multica runtime (workdir-local) ─────
+.agent_context/
+.multica/
+.worktrees/
