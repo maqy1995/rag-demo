@@ -85,12 +85,12 @@ def _cmd_up(args: argparse.Namespace) -> int:
     data_dir = args.data
     index_dir = args.index
     try:
-        from .config import load_config  # MAQ-13 落地后提供
+        from .config import load_config  # MAQ-13 提供
         cfg = load_config()
-        data_dir = cfg.vault.path or data_dir
-        index_dir = getattr(cfg.web, "index_dir", None) or index_dir
-    except ImportError:
-        # L4 config 尚未落地 — 用 CLI 参数 (本子 issue 预期路径)
+        data_dir = cfg.vault_path or data_dir
+        index_dir = cfg.index_dir or index_dir
+    except (ImportError, AttributeError):
+        # L4 config 尚未落地 / 字段不匹配 — 走 CLI 参数
         pass
 
     stop_event = threading.Event()

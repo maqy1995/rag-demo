@@ -1761,6 +1761,7 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -1810,6 +1811,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "types-requests", marker = "extra == 'dev'" },
 ]
