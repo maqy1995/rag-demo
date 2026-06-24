@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -75,17 +77,44 @@ def test_web_help() -> None:
     assert "--no-ingest" in out.stdout
 
 
-def test_up_no_ingest_fallback_when_web_missing() -> None:
-    """MAQ-11 / MAQ-15: web app 未落地时, --no-ingest 优雅降级.
+def test_up_no_ingest_starts_web_then_terminates_on_signal() -> None:
+    """MAQ-11 / MAQ-15 / MAQ-17: web app 已落地, `up --no-ingest` 应能启动 uvicorn.
 
-    不接真实 LLM / 真实 web server, 仅验证 import 失败不导致 crash.
+    用 socket 找到一个空闲端口, 启动子进程, 等待端口可连, 发 SIGTERM,
+    验证 graceful shutdown (exit 0). 不做端到端 HTTP 验证 (test_web.py 已覆盖).
     """
-    res = subprocess.run(
-        [sys.executable, "-m", "rag_demo", "up", "--no-ingest"],
-        capture_output=True,
-        text=True,
-        timeout=10,
+    import signal
+    import socket
+    import time
+
+    # 找空闲端口
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    cmd = [
+        sys.executable, "-m", "rag_demo", "up", "--no-ingest",
+        "--host", "127.0.0.1", "--port", str(port),
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    # graceful fallback 应 exit 0; web.main:app ImportError 已被 except ImportError 吞掉
-    assert res.returncode == 0
-    assert "web module not yet implemented" in res.stdout
+    try:
+        # 等待端口可连 (max 8s)
+        for _ in range(80):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            pytest.fail(f"up did not bind port {port} within 8s")
+        # 端口可达 — 优雅退出
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        assert proc.returncode == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
