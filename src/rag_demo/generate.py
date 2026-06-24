@@ -15,20 +15,13 @@ to ensure the LLM is never silently called on the early-return paths.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 from .retrieve import Hit
-
-
-# MAQ-11 stub default: always returns True (preserves old _cmd_ask behavior —
-# LLM is called for any non-empty hits). MAQ-12 (validate.py) replaces this
-# default with `is_defined_in_hits`. The placeholder keeps this module
-# importable in isolation, before `validate.py` lands.
-_DEFAULT_DEFINED_CHECKER: Callable[[str, list[Hit]], bool] = lambda q, h: True
-
+from .validate import DefinedCheck, is_defined_in_hits
 
 # 设计 §3.5: 可注入的判定函数签名 (与 validate.DefinedCheck 兼容)
-DefinedCheck = Callable[[str, list[Hit]], bool]
+# —— 历史: MAQ-11 stub 阶段用 `lambda q, h: True` 占位, MAQ-12 起改用
+# validate.is_defined_in_hits 作为默认 (PRD §8.2 v0.3 NB1 修复路径).
 
 
 @dataclass(frozen=True)
@@ -53,7 +46,7 @@ def answer(
     question: str,
     hits: list[Hit],
     *,
-    defined_checker: DefinedCheck = _DEFAULT_DEFINED_CHECKER,
+    defined_checker: DefinedCheck = is_defined_in_hits,
 ) -> AnswerResult:
     """决策链 (design §3.5)."""
     # 决策 1: hits 为空 -> RETRIEVE_EMPTY (LLM 不被调)

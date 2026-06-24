@@ -198,7 +198,9 @@ def main(argv: list[str] | None = None) -> int:
         "--index", default="./data/index",
         help="index dir (overridden by config.yaml once MAQ-13 lands)",
     )
-    p_up.add_argument("--no-ingest", action="store_true", help="skip background ingest (debug only)")
+    p_up.add_argument(
+        "--no-ingest", action="store_true", help="skip background ingest (debug only)"
+    )
     p_up.set_defaults(func=_cmd_up)
 
     p_web = sub.add_parser(
