@@ -2,9 +2,11 @@
 
 > multica-issue: [MAQ-8](mention://issue/5cfcacd2-1c88-4079-81a7-79a1abdef8ab)
 > 维护者：资深全栈开发工程师 (`01386b69…`)
+> 评审：Reviewer (`e57a9ea0…`) — **Approved with comments**（v1.1）
 > 上游输入：[MAQ-5](mention://issue/b57b0b4f-4c0b-4965-a0f9-6d391bd5a01c) PRD v0.3（Final, Reviewer Approved with comments）
 > 关联交接单：[handoffs/2026-06-24-from-reviewer-to-product-and-dev-prd-v0.3.md](../handoffs/2026-06-24-from-reviewer-to-product-and-dev-prd-v0.3.md)
-> 状态：**Review-ready v1**（5 个 ADR 落地后即可进入实现 v1）
+> 评审报告：[docs/review/reports/2026-06-24-MAQ-9-design-review.md](../review/reports/2026-06-24-MAQ-9-design-review.md)
+> 状态：**Approved v1.1**（5 个 ADR 落地后即可进入实现 v1；§11.3 实现工单按序开工）
 > 日期：2026-06-24
 
 ---
@@ -117,19 +119,21 @@
 
 | 模块 | 文件 | 关键导出 | 行数（目标） |
 |------|------|---------|------------|
-| `ingest` | `src/rag_demo/ingest.py` | `ingest_directory`, `IngestStats`, `IngestFilters` | ≤ 200 |
-| `retrieve` | `src/rag_demo/retrieve.py` | `retrieve`, `Hit` | ≤ 120 |
-| `generate` | `src/rag_demo/generate.py` | `answer`, `AnswerResult` | ≤ 180 |
+| `ingest` | `src/rag_demo/ingest.py` | `ingest_directory`, `IngestStats` | ≤ 250 |
+| `retrieve` | `src/rag_demo/retrieve.py` | `retrieve`, `Hit` | ≤ 150 |
+| `generate` | `src/rag_demo/generate.py` | `answer`, `AnswerResult` | ≤ 220 |
 | `validate` | `src/rag_demo/validate.py`（**v0.3 新增**） | `is_defined_in_hits`, `DefinedCheck` | ≤ 80 |
-| `web` | `src/rag_demo/web/main.py`（**新增**） | FastAPI app, router | ≤ 250 |
+| `web` | `src/rag_demo/web/main.py`（**新增**） | FastAPI app, router | ≤ 280 |
 | `web.static` | `src/rag_demo/web/static/index.html`（**新增**） | 单 HTML 双面板 | ≤ 600 |
 | `config` | `src/rag_demo/config.py`（**新增**） | `load_config`, `AppConfig` | ≤ 150 |
 | `logging_setup` | `src/rag_demo/logging_setup.py`（**新增**） | `setup_json_logging`, `JsonLogRecord` | ≤ 80 |
-| `errors` | `src/rag_demo/errors.py`（**新增**） | `AppError`, error code 字典 | ≤ 80 |
-| `vault_uri` | `src/rag_demo/vault_uri.py`（**新增**） | `encode`, `decode` | ≤ 60 |
-| `__main__` | `src/rag_demo/__main__.py`（**扩展**） | CLI 入口；新增 `up` / `web` 子命令 | ≤ 200 |
+| `errors` | `src/rag_demo/errors.py`（**新增**） | `AppError`, 状态码 / 决策码字典 | ≤ 80 |
+| `vault_uri` | `src/rag_demo/vault_uri.py`（**新增**） | `encode`, `decode` | ≤ 80 |
+| `__main__` | `src/rag_demo/__main__.py`（**扩展**） | CLI 入口；新增 `up` / `web` 子命令 | ≤ 220 |
 
-> 总目标代码量（不含测试 / 模板）≤ 2000 行 Python + ≤ 600 行 HTML。
+> 总目标代码量（不含测试 / 模板）≤ 2300 行 Python + ≤ 600 行 HTML。
+> 11 个模块合计 ≤ 2300 行：v0.3 落地后若实际 < 2000 行，回归 2000 行预算；本轮上浮是为
+> §3.5 `answer` 决策链 + §3.6 SSE 协议 + §4.1 冷启动后台 ingest 线程的复杂度留余量。
 
 ### 3.2 ingest
 
@@ -139,11 +143,13 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class IngestStats:
+    state: str               # "idle" | "building" | "error"  （与 PRD §7.3 /api/index/status 一致）
     files_total: int
     chunks_total: int
     skipped_unchanged: int   # 增量更新命中 mtime/sha 的文件数
-    duration_ms: int
-    state: str               # "idle" | "building" | "error"
+    current_progress: dict | None  # 形如 {"done": int, "total": int}；None 表示不在构建中
+    last_built_at: str | None      # ISO 8601；从未成功构建过为 None
+    duration_ms: int               # 本次构建耗时（增量更新时为本次 diff 耗时）
 
 def ingest_directory(
     data_dir: str | Path,
@@ -163,6 +169,8 @@ def ingest_directory(
 - **增量更新范围**（PRD §3.1 F3）：仅启动时 mtime/sha diff；不引入 file-watcher。
 - **写入**：`data/index/manifest.json`（已有 stub）+ 向量库子目录（路径 ADR-0002 拍板）。
 - **错误**：`FileNotFoundError(data_dir)`、`ValueError(chunk_overlap >= chunk_size)` → 在 L4 包装成 `AppError(code=INGEST_INVALID_CONFIG, stage="ingest")`。
+- **`/api/index/status` 的数据源**：`IngestStats` 是单一信源；`ingest_directory` 落盘时同步写 `data/index/status.json`（与 `manifest.json` 同级），Web 层只读取不再二次计算。
+- **冷启动 demo 回退（PRD §3 F1 + §3 F8）**：当 `data_dir` 不存在或 `vault.path` 为空时，`ingest_directory` **不报错**——fallback 到 `data/raw.sample/`（仓库内置 5–10 篇示例笔记，S4 软阻塞的产物），用 `IngestStats.state="building"` 启动后续流程。
 
 ### 3.3 retrieve
 
@@ -188,7 +196,7 @@ def retrieve(
 要点：
 
 - **空检索**（US4 触发条件）：返回 `[]`；调用方负责把它转成 `RETRIEVE_EMPTY`。
-- **过滤器**：PRD §3.2 F11 是 Nice-to-Have，MVP 仅留接口、不强制实现；空 `filters={}` 等价于全库。
+- **过滤器**：`filters: dict | None` 在 v1 是**未类型化**的 dict（仅留接口、不强制实现）；`{"folder": "AI/", "since": "2026-01-01"}` 这类约定由调用方保证。PRD §3.2 F11 是 Nice-to-Have，v0.2 升级为 `RetrieveFilters`（TypedDict）时再加字段。空 `filters={}` / `None` 等价于全库。
 - **稳定排序**：`score` 降序；同分按 `file, chunk_id` 升序，便于测试断言。
 
 ### 3.4 validate（**v0.3 新增**，响应 Reviewer NB1）
@@ -234,7 +242,7 @@ def answer(
 
 要点：
 
-- **签名扩展**（handoff §开发待办）：v0.3 把 `defined_checker` 注入到签名，默认走新逻辑；旧无参调用兼容。
+- **签名扩展**（handoff §开发待办）：v0.3 把 `defined_checker` 注入到签名，默认走新逻辑；旧无参调用 `answer(question, hits)` 仍合法（keyword-only 参数带默认值，自动走新决策链），不会破坏现有 `__main__.py::_cmd_ask` 与已编写的测试。
 - **决策链**（PRD §8.2 v0.3 强化）：
   1. `hits` 为空 → `AnswerResult(answer="未在笔记中找到相关内容", sources=[], decision="RETRIEVE_EMPTY")`
   2. `hits` 非空但 `defined_checker(question, hits) == False` → `AnswerResult(answer="你的笔记里没找到 {q} 的明确定义，仅有的相关片段是：...", sources=hits, decision="NOT_DEFINED")`（**不发 LLM**）
@@ -260,8 +268,13 @@ POST /api/usage          北极星埋点（写 data/usage/local-{date}.jsonl）
 - **SSE 协议**（PRD §7.3）：
   - `event: token` / `data: {"delta": "..."}` 流式片段
   - `event: sources` / `data: {"sources": [...]}` 一次发完整列表
-  - `event: meta` / `data: {"retrieved": N, "cost_ms": {"retrieve": 120, "generate": 1830}}` 收尾
+  - `event: meta` / `data: {"retrieved": N, "decision": "GENERATED|RETRIEVE_EMPTY|NOT_DEFINED", "cost_ms": {"retrieve": 120, "generate": 1830}}` 收尾
   - `event: error` / `data: {"error": {...}}` 异常路径（不破坏 SSE 连接）
+- **SSE 在 US4 / US6 早返路径下的形态**（PRD §8.2 v0.3 决策链的协议层落地）：
+  - `RETRIEVE_EMPTY`（hits 为空）：**只发 1 个 `token`** = `未在笔记中找到相关内容` + `sources: []` + `meta.decision="RETRIEVE_EMPTY"`。LLM **未被调用**。
+  - `NOT_DEFINED`（hits 非空但 `is_defined_in_hits == False`）：**只发 1 个 `token`** = `你的笔记里没找到 {question} 的明确定义，仅有的相关片段是：...` + 完整 `sources` + `meta.decision="NOT_DEFINED"`。LLM **未被调用**。
+  - `GENERATED`（正常路径）：`token × N` + `sources` + `meta.decision="GENERATED"` + `meta.cost_ms.generate > 0`。
+  - 三条路径用 `meta.decision` 区分；前端按 `decision` 分支渲染（拒绝文案 / 引用块 / 答案正文）。
 - **错误响应**（PRD §5 + §7.3）：统一 `{"error": {"code": "...", "message": "...", "stage": "..."}}`，4xx/5xx 一律此格式。
 - **静态文件**：`src/rag_demo/web/static/index.html` 由 FastAPI `StaticFiles` mount 在 `/` 下；冷启动 demo 5 条示例问题在这里硬编码（响应 §3.1 F8 + §8.2）。
 
@@ -271,13 +284,19 @@ POST /api/usage          北极星埋点（写 data/usage/local-{date}.jsonl）
 rag-demo ingest [--data DIR] [--index DIR] [--chunk-size N] [--chunk-overlap N] [--full/--incremental]
 rag-demo ask "question" [--index DIR] [--top-k N]
 rag-demo doctor
-rag-demo up [--host 127.0.0.1] [--port 8000]     # 启动 FastAPI（**v0.3 新增**）
-rag-demo web   [--host 127.0.0.1] [--port 8000]   # 等价于 up；别名便于 IDE
+rag-demo up   [--host 127.0.0.1] [--port 8000] [--no-ingest]   # **主入口**：启动 FastAPI + 后台 ingest
+rag-demo web [--host 127.0.0.1] [--port 8000]                 # `up` 的别名（IDE / 习惯用语兼容）
 ```
 
 要点：
 
-- **`up` 是新子命令**（handoff §开发待办提的 `POST /api/ingest` 触发 → CLI 也要有等价入口；否则 web 起得来但没人触发 ingest）。
+- **`up` 是主入口**（v0.3 新增，handoff §开发待办 + §3.6 联动）。`up` 做的事：
+  1. `load_config()`（§6.1）
+  2. 启动后台线程跑 `ingest_directory(data, index, full=True)`（§4.1 冷启动路径）
+  3. `uvicorn.run(web.app, host, port)`（阻塞主线程）
+  4. SIGINT / SIGTERM 优雅退出（`up` 启动的 ingest 子线程要 join 或 cancel，避免孤儿进程）
+  5. `--no-ingest` 开关：仅起服务、不跑 ingest（用于排错或用户已手动 ingest 过）
+- **`web` 是 `up` 的别名**——同样参数、同样行为。文档 / README / 帮助文案里以 `up` 为准，`web` 仅作 IDE / docker-compose 习惯兼容。
 - **`doctor` 输出增加"config 文件存在与否"行**：方便排查 §3.1 F1 默认配置问题。
 - **CLI 不引入新日志格式**——直接复用 L4 `logging_setup`。
 
@@ -308,6 +327,11 @@ T+?min   ingest 完成 → GET /api/index/status → state=idle
 **断言**（`tests/test_cold_start.py`，PRD §8.2 v0.3 新增）：
 - 计时点：`index.html` 首字节 → 5 条示例按钮 DOM `clickable` 属性置位。
 - 阈值：mock 后端 5s 内返回 / 真实后端 30s 内必须可点击；超时记入 §8.4 冷启动放弃率埋点。
+
+**5 条示例问题的回答源**：在 ingest 还没完成 / 失败时，5 条示例问题**必须用 `data/index.sample/`（S4 软阻塞的产物）**预建索引回答，而不是从用户 Vault 取——这样：
+- 即使用户 Vault 还没配置（NS3 冷启动兜底），示例问题也能跑通端到端
+- 即使用户 Vault 索引构建慢（>30s），示例问题也不被拖累
+- 前端通过 `meta.decision` 区分"示例问题回答"（来源 `index.sample`）与"用户 Vault 问答"（来源 `data/index/`）；等 ingest 完成 SSE/轮询通知后，前端解锁"问你的笔记"入口
 
 ### 4.2 正常问答路径（F4 / F5）
 
@@ -392,15 +416,15 @@ HTTP:               POST /api/ingest  {"full": true}
 { "error": { "code": "RETRIEVE_EMPTY", "message": "未在笔记中找到相关内容", "stage": "retrieve" } }
 ```
 
-错误码字典（`src/rag_demo/errors.py` 单一信源）：
+状态码 / 决策码字典（`src/rag_demo/errors.py` 单一信源；`RETRIEVE_EMPTY` 与 `NOT_DEFINED` 不是异常，是 `decision`，但在同一个码表里统一维护便于前端按 `code` 路由）：
 
 | code | stage | 含义 | 触发 |
 |------|-------|------|------|
 | `INGEST_INVALID_CONFIG` | ingest | chunk 参数非法 / vault 路径不存在 | `ingest_directory` 启动期 |
 | `INGEST_BUILD_FAIL` | ingest | embedder 抛错 | `ingest_directory` 中段 |
-| `RETRIEVE_EMPTY` | retrieve | Top-K = 0 | `retrieve` 返回 `[]` |
+| `RETRIEVE_EMPTY`（**决策**） | retrieve | Top-K = 0 → US4 路径 | `retrieve` 返回 `[]` |
 | `RETRIEVE_INDEX_MISSING` | retrieve | `data/index/` 不存在或为空 | `retrieve` 启动期 |
-| `NOT_DEFINED` | generate | US6 命中 | `answer()` 早返 |
+| `NOT_DEFINED`（**决策**） | generate | hits 非空但 `is_defined_in_hits==False` → US6 路径 | `answer()` 早返 |
 | `GENERATE_LLM_FAIL` | generate | LLM API 5xx / 超时 | `answer()` 中段 |
 | `GENERATE_INVALID_QUESTION` | generate | question 为空 / 超长 | `answer()` 启动期 |
 | `CONFIG_LOAD_FAIL` | infra | config.yaml 解析失败 | `config.load()` |
@@ -465,12 +489,12 @@ usage:
 ### 6.3 错误
 
 - **业务错误统一抛 `AppError`**（`src/rag_demo/errors.py`），由 L4 → L3 的边界处统一捕获并转 JSON。
-- **HTTP 状态码映射**：
-  - `RETRIEVE_EMPTY` → 200 + `decision="RETRIEVE_EMPTY"`（**业务正常**，不是错误；前端按 `decision` 分支渲染）
-  - `NOT_DEFINED` → 200 + `decision="NOT_DEFINED"`（同上）
-  - `GENERATE_LLM_FAIL` / `INGEST_BUILD_FAIL` / `RETRIEVE_INDEX_MISSING` → 503
-  - `*_INVALID_*` → 400
-  - `CONFIG_LOAD_FAIL` → 500
+- **HTTP 状态码映射**（与 §5 码表严格对齐）：
+  - `RETRIEVE_EMPTY` / `NOT_DEFINED`（**决策码**）→ 200，body 顶层是 `{answer, sources, decision}`，**不**走 `{error: {...}}`；前端按 `decision` 字段分支渲染（§3.6 SSE 也走同一约定）
+  - `GENERATE_LLM_FAIL` / `INGEST_BUILD_FAIL` / `RETRIEVE_INDEX_MISSING` → 503，body 是 `{error: {code, message, stage}}`
+  - `*_INVALID_*`（参数错误） → 400
+  - `CONFIG_LOAD_FAIL` / `USAGE_LOG_FAIL` → 500
+- **实现约束**：L3（web）→ L2（core）的边界统一捕获 `AppError`，**不**让 5xx 直接冒泡为 FastAPI 默认 500；L3 端点模板（每个 ≤ 30 行）固定为 `try: core_call() except AppError as e: return JSONResponse(status_code=e.http_status, content={"error": {...}})`。
 
 ---
 
@@ -506,13 +530,32 @@ uv run rag-demo up                       # 启动 FastAPI + 后台 ingest
 # 浏览器打开 http://127.0.0.1:8000/
 ```
 
-### 7.3 内部模块导入顺序（防止循环依赖）
+### 7.3 内部模块依赖图（防止循环依赖）
+
+> 基础层（L4 横切 + 数据类型）**只被上层引用、不引用上层**；L2 core 之间除 `validate → retrieve.Hit` 外不互相 import。
 
 ```
-errors ──▶ vault_uri ──▶ config ──▶ logging_setup ──▶ validate ──▶ ingest ──▶ retrieve ──▶ generate ──▶ web/CLI
+L4 横切（基础层，零业务依赖）
+  errors          ← AppError, 状态码 / 决策码字典
+  vault_uri       ← vault:// 编解码（无业务依赖）
+  config          ← load_config, AppConfig
+  logging_setup   ← setup_json_logging
+
+L2 core（业务层；互相之间的依赖见下）
+  ingest     ──▶ errors, config, logging_setup, vault_uri
+  retrieve   ──▶ errors, config, logging_setup
+  validate   ──▶ retrieve.Hit（仅类型，无运行期依赖）  ← ⚠ 仅类型导入，避免循环
+  generate   ──▶ retrieve.Hit, validate.is_defined_in_hits, errors, config, logging_setup
+
+L3 接口（最外层）
+  web/main.py    ──▶ ingest, retrieve, generate, config, errors, logging_setup
+  __main__.py    ──▶ ingest, retrieve, generate, config, errors, logging_setup
 ```
 
-> 任何反向依赖都视为架构违规；code review 必查。
+**反向依赖即视为架构违规**，code review 必查；典型反例：
+- `retrieve` 调 `generate`（不允许，retrieval 不应感知生成）
+- `validate` 调 `ingest`（不允许，validate 是纯函数）
+- L4 任何模块 import L2 / L3（不允许）
 
 ---
 
@@ -522,15 +565,20 @@ errors ──▶ vault_uri ──▶ config ──▶ logging_setup ──▶ va
 
 | 指标 | 预算 | 条件 | 测量点 | 测试位置 |
 |------|------|------|--------|---------|
-| 首字延迟（流式） | ≤ **2 s** | Vault ≤ 1k 切片 + 本地 LLM | SSE 第一个 `event: token` 时间戳 | `tests/test_chat.py::test_first_byte_latency` |
-| 总延迟（非流式） | ≤ **10 s** | 同上 | HTTP 响应完整时间 | `tests/test_chat.py::test_total_latency` |
+| 首字延迟（流式） | ≤ **2 s** | Vault ≤ 1k 切片 + 本地 LLM **已预热** | SSE 第一个 `event: token` 时间戳 | `tests/test_chat.py::test_first_byte_latency` |
+| 总延迟（非流式） | ≤ **10 s** | 同上（已预热） | HTTP 响应完整时间 | `tests/test_chat.py::test_total_latency` |
+| **模型预热豁免** | 首次请求 ≤ **60 s** | Ollama 冷启动 + qwen2.5 7B 加载 | `up` 启动 → 第一次 chat_stream | `tests/test_warmup.py`（手工 smoke） |
 | 冷启动 demo | ≤ **30 s** | `index.html` 首字节 → 5 按钮可点击 | Playwright / 纯计时 | `tests/test_cold_start.py` |
-| 增量更新 | ≤ **30 s** | 改动 ≤ 10 个文件 | CLI `ingest` 退出耗时 | `tests/test_smoke.py::test_ingest_incremental` |
+| 增量更新（**内部 SLO**，非 PRD 承诺） | ≤ **30 s** | 改动 ≤ 10 个文件 | CLI `ingest` 退出耗时 | `tests/test_smoke.py::test_ingest_incremental` |
 | 全量建索引（3b） | README 列预期 | 100 篇 ≈ 5–15 min（远程） / 2–3×（本地） | README §"性能预期" | 仅文档 |
+| 冷启动后台 ingest | 不阻塞 30s demo | `up` 后台线程 | `IngestStats.state` 转换 | `tests/test_cold_start.py` 关联断言 |
 
 ### 8.2 资源占用
 
-- **内存**：≤ 1 GB（Ollama 默认 qwen2.5 7B ≈ 5 GB；按用户配置可升）。
+- **内存**：
+  - **rag-demo 进程 ≤ 1 GB**（含 Python runtime、向量库加载、FastAPI 工作进程）
+  - **LLM / Embedding 模型按用户配置独立预算**（Ollama qwen2.5 7B ≈ 5 GB；bge-small embedding ≈ 0.3 GB；OpenAI / Anthropic 远程调用不占本机内存）
+  - 上限以用户 `config.yaml` 为准；README 给出常见组合的内存对照表
 - **磁盘**：`data/index/` ≤ 100 MB（1k 切片、bge-small 向量）；`data/usage/` 按 100 事件/天 ≈ 10 KB/天。
 - **不强制 GPU**；Embedding 走 API 或 Ollama CPU。
 
@@ -568,9 +616,11 @@ errors ──▶ vault_uri ──▶ config ──▶ logging_setup ──▶ va
 
 ### 9.2 关键断言
 
-- **US4**（`test_chat.py::test_us4_empty_hits`）：`retrieve` 返回 `[]` → `answer(question, [])` → `decision == "RETRIEVE_EMPTY"`；mock LLM = `unreachable`，LLM **未被调用**。
-- **US6**（`test_chat.py::test_us6_no_definition`）：mock `defined_checker` 返回 `False` → `answer()` → `decision == "NOT_DEFINED"`；mock LLM = `unreachable`，LLM **未被调用**。
-- **happy path**（`test_chat.py::test_happy_path`）：mock `defined_checker` 返回 `True` → LLM 被调用一次 → `decision == "GENERATED"`；mock LLM 校验 prompt 包含 `hits` 片段。
+- **US4**（`test_chat.py::test_us4_empty_hits`）：`retrieve` 返回 `[]` → `answer(question, [])` → `decision == "RETRIEVE_EMPTY"`；mock LLM 用 `unreachable_llm`（`unittest.mock.MagicMock(side_effect=AssertionError("LLM must not be called on US4 path"))`）→ LLM **未被调用**。
+- **US6**（`test_chat.py::test_us6_no_definition`）：mock `defined_checker` 返回 `False` → `answer()` → `decision == "NOT_DEFINED"`；同上 `unreachable_llm` → LLM **未被调用**。
+- **happy path**（`test_chat.py::test_happy_path`）：mock `defined_checker` 返回 `True` → 真实 LLM 入口（mock 返回固定 token 序列）被调用一次 → `decision == "GENERATED"`；断言 `mock_llm.call_args.kwargs["messages"][-1]["content"]` 包含每个 hit 的 `snippet` 头 20 字。
+
+> **断言强度的工程纪律**：在 US4 / US6 测试中，`LLM 必须未被调用` 这件事**不能靠"不写 LLM mock"** 来隐式表达——必须**显式 raise**。否则一旦 LLM 调用被错误地接进决策链，测试不会失败，断言失去意义。
 - **冷启动 30s**（`test_cold_start.py`）：mock `ingest_directory` 延迟 5s → 计时前端首字节到示例按钮可点击 ≤ 30s。
 
 ### 9.3 不要在测试里做的事
@@ -591,9 +641,9 @@ errors ──▶ vault_uri ──▶ config ──▶ logging_setup ──▶ va
 | §8.2 冷启动 30s | 前端首字节 → 按钮可点击 ≤ 30s | `tests/test_cold_start.py` | `test_cold_start.py` | 设计落地 |
 | §8.3 3a | 新环境 ≤ 3 分钟 demo | README + `data/index.sample/`（**待建**） | 手工 / smoke | 缺产物 |
 | §8.3 3b | 100 篇 ≈ 5–15 min | README §性能预期 | 文档 | 文档落地 |
-| §8.4 活跃频次 | 5 天 ≥ 3 次/天 | `POST /api/usage` → `data/usage/` | 上线后观测 | 设计落地 |
-| §8.4 引用点击率 | ≥ 30% | 同上 + 前端埋点 | 上线后观测 | 设计落地 |
-| §8.4 冷启动放弃率 | < 20% | 前端 + `/api/usage/query` | 上线后观测 | 设计落地 |
+| §8.4 活跃频次 | 5 天 ≥ 3 次/天 | `POST /api/usage` → `data/usage/` | **部署上线后**观测 | 设计落地 |
+| §8.4 引用点击率 | ≥ 30% | 同上 + 前端埋点 | **部署上线后**观测 | 设计落地 |
+| §8.4 冷启动放弃率 | < 20% | 前端 + `/api/usage/query` | **部署上线后**观测 | 设计落地 |
 
 > 8.3 3a 缺 `data/index.sample/` 是开发侧阻塞（S2 软阻塞也依赖产品 10 题样例）。已在 §11 挂出。
 
@@ -625,13 +675,25 @@ errors ──▶ vault_uri ──▶ config ──▶ logging_setup ──▶ va
 | S3 | 参考日志 JSON schema 草稿 | 开发 | §6.2 schema 二次校验（开发可自提） |
 | S4 | `data/index.sample/` 内置示例索引 | 开发 | §8.3 3a ≤3 分钟 demo |
 
-### 11.3 设计本轮遗留（合入前自清）
+### 11.3 实现工单（按 §7.1 ADR 落地节奏并行；不开新 issue，直接挂在 [MAQ-8](mention://issue/5cfcacd2-1c88-4079-81a7-79a1abdef8ab) 子任务）
 
-- [ ] `src/rag_demo/validate.py` 落地（**首个开发工单**）
+> 本节是**实现侧 TODO**，不是设计缺口——设计 v1 已就绪。开发同事按下面顺序开工即可。
+
+- [ ] `src/rag_demo/validate.py` 落地（**首个开发工单**；含 `is_defined_in_hits` 纯函数 + `DefinedCheck` 类型别名）
 - [ ] `src/rag_demo/config.py` / `logging_setup.py` / `errors.py` / `vault_uri.py` 四个 L4 模块落地
-- [ ] `generate.answer` 签名扩展（带 `defined_checker`），旧签名保留
-- [ ] `__main__.py` 新增 `up` 子命令
-- [ ] `tests/test_smoke.py` 不变；新增 `test_validate.py` / `test_chat.py` / `test_cold_start.py` 骨架
+- [ ] **现有 stub 对齐新签名**（注意：现 stub 与 v1 设计不一致，必须先对齐再写新模块）：
+  - `ingest_directory` 增加 `full: bool` / `chunk_overlap: int` 两个 kwarg；返回类型从 `int` 改为 `IngestStats`
+  - `retrieve` 增加 `filters: dict | None` kwarg
+  - `generate.answer` 增加 `defined_checker: DefinedCheck = is_defined_in_hits` kwarg
+  - `__main__.py` 新增 `up` / `web` 子命令（`up` 为 canonical，`web` 为 alias）
+  - **不**修改 `__main__.py::_cmd_ask` 的旧调用——`defined_checker` 有默认值，旧调用合法
+- [ ] `__main__.py::_cmd_doctor` 输出新增 `config.yaml` 存在性行
+- [ ] 新增测试骨架（**测试先写、测试先红**）：
+  - `tests/test_validate.py`（`is_defined_in_hits` 正反例）
+  - `tests/test_chat.py`（US4 / US6 / happy path，按 §9.2 `unreachable_llm` 纪律）
+  - `tests/test_cold_start.py`（30s 断言）
+  - `tests/test_config.py` / `test_errors.py` / `test_vault_uri.py`（L4 模块）
+- [ ] `tests/test_smoke.py` 保持现状（CLI 烟雾），扩展一行断言 `up` 子命令 `--help` 可用
 
 ---
 
@@ -640,6 +702,7 @@ errors ──▶ vault_uri ──▶ config ──▶ logging_setup ──▶ va
 | 日期 | 版本 | 变更 | 来源 |
 |------|------|------|------|
 | 2026-06-24 | v1 | 首版：基于 PRD v0.3（[MAQ-7](mention://issue/0798b1d3-0fca-44dd-84bf-9c40e49d6e47)）落地，把"三段式 stub + 待决项"骨架扩为分层架构 + 契约 + 决策链 + 验收对照 | [MAQ-8](mention://issue/5cfcacd2-1c88-4079-81a7-79a1abdef8ab) |
+| 2026-06-24 | v1.1 | Reviewer 评审 pass：§3.1 行数预算上浮（2k→2.3k）+ 删除未定义的 `IngestFilters`；§3.2 `IngestStats` 补 `last_built_at` / `current_progress` + 冷启动 fallback 路径 + status 单一信源；§3.3 `filters` 标注为未类型化 v1；§3.5 旧签名兼容说明；§3.6 SSE 协议补 US4 / US6 早返形态 + `meta.decision`；§3.7 `up` 升为主入口、`web` 降为 alias，加 `--no-ingest` 与优雅退出；§4.1 5 示例问题回答源 = `data/index.sample/`；§5 错误码字典改"状态码 / 决策码字典"并标 `RETRIEVE_EMPTY` / `NOT_DEFINED` 为决策；§6.3 L3→L2 边界实现约束；§7.3 内部模块依赖图由线性链改为 DAG；§8.1 增量更新标"内部 SLO"+ 模型预热豁免 + 冷启动后台 ingest 行；§8.2 内存区分 rag-demo 进程 / LLM；§9.2 US4/US6 断言强度工程纪律；§10 §8.4 行加"部署上线后"前缀；§11.3 改名"实现工单"并补 stub 对齐清单。**整体结论：Approved with comments**。详见 [MAQ-9](mention://issue/2d181966-ca77-472a-924e-a5b03d4d6c90) 报告 `docs/review/reports/2026-06-24-MAQ-9-design-review.md`。 | [MAQ-9](mention://issue/2d181966-ca77-472a-924e-a5b03d4d6c90) |
 
 ---
 

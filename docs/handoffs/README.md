@@ -15,3 +15,4 @@
 |------|------|------|------|
 | [2026-06-24-from-reviewer-to-product-and-dev-prd-v0.3.md](./2026-06-24-from-reviewer-to-product-and-dev-prd-v0.3.md) | Reviewer | 产品 + 开发 | 已交付 |
 | [2026-06-24-from-dev-to-reviewer-design.md](./2026-06-24-from-dev-to-reviewer-design.md) | 开发 | Reviewer | 已交付 |
+| [2026-06-24-from-reviewer-to-dev-design-v1.1.md](./2026-06-24-from-reviewer-to-dev-design-v1.1.md) | Reviewer | 开发 | 已交付 |
