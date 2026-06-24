@@ -9,6 +9,7 @@
   （账号、域名、限制、注意事项）
 - `deployment.md` — 部署流程（前置、步骤、回滚）
 - `runbook.md` — 故障排查（症状 → 排查 → 修复）
+- `runbooks/local-dev.md` — 本机开发工作流（multica + GitHub 资源绑定 + 30 分钟接入 checklist）
 - `secrets/` 模板（**只放示例，不放真值**）
 
 ## 不放什么
