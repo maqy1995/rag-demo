@@ -13,4 +13,5 @@
 
 | 文件 | 起点 | 终点 | 状态 |
 |------|------|------|------|
-| _无_ | | | |
+| [2026-06-24-from-reviewer-to-product-and-dev-prd-v0.3.md](./2026-06-24-from-reviewer-to-product-and-dev-prd-v0.3.md) | Reviewer | 产品 + 开发 | 已交付 |
+| [2026-06-24-from-dev-to-reviewer-design.md](./2026-06-24-from-dev-to-reviewer-design.md) | 开发 | Reviewer | 已交付 |
