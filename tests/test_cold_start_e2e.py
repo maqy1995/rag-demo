@@ -117,6 +117,37 @@ def test_cold_start_index_html_responds_within_30s(uvicorn_proc):
     assert elapsed < 30.0, f"cold-start 首字节 {elapsed:.1f}s 超 30s 阈值"
 
 
+def test_index_html_has_ui_essentials(uvicorn_proc):
+    """MAQ-41: 静态 UI 含 Vue 3 + marked.js CDN, 双面板 + 5 示例 + 4 个 API 端点.
+
+    这是 Playwright click-flow 测试的轻量替代 — 在 sandbox 无浏览器/Playwright
+    环境下, 通过抓 HTML 字节验证关键 DOM/JS 元素存在. 真实点击 → 流式渲染
+    需要人工 smoke (打开浏览器点一下) 或在 CI 装 playwright + chromium.
+    """
+    port, _ = uvicorn_proc
+    r = requests.get(f"http://127.0.0.1:{port}/", timeout=5.0)
+    assert r.status_code == 200
+    html = r.text
+    # Vue 3 + marked.js CDN
+    assert "unpkg.com/vue@3" in html, "Vue 3 CDN 缺失"
+    assert "unpkg.com/marked" in html, "marked.js CDN 缺失"
+    # 双面板: Search + Ask
+    assert "🔍 Search" in html or "Search" in html
+    assert "Ask" in html
+    # 4 个 API 端点
+    for endpoint in ("/api/config", "/api/index/status", "/api/search", "/api/chat/stream"):
+        assert endpoint in html, f"UI 缺 {endpoint} 调用"
+    # marked.js 用于答案 + sources 渲染
+    assert "marked.parse" in html
+    # 索引状态条轮询
+    assert "setInterval" in html and "fetchStatus" in html
+    # ≥ 200 行 (spec 要求)
+    assert html.count("\n") >= 200, f"index.html 仅 {html.count(chr(10))} 行, 不足 200"
+    # 5 条示例问题 (硬编码起步)
+    assert html.count("exampleQuestions") >= 1
+    assert r.headers.get("content-type", "").startswith("text/html")
+
+
 def test_api_index_status_returns_state_field(uvicorn_proc):
     """/api/index/status 返回 {state: ...} 结构."""
     port, _ = uvicorn_proc
