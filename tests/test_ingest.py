@@ -128,6 +128,25 @@ def test_ingest_empty_data_dir_falls_back(tmp_path: Path) -> None:
     assert stats.files_total >= 1
 
 
+def test_ingest_dir_with_only_dotfiles_falls_back(tmp_path: Path) -> None:
+    """MAQ-46: data_dir 只有 .gitkeep 这种 dotfile 占位 → 也走 fallback.
+
+    之前的 `any(data_dir.iterdir())` 会被 .gitkeep 挡住, 误判为"非空"
+    然后继续 scan 拿到 0 个可 ingest 文件, files_total=0 chunks_total=0.
+    修复: iterdir 时过滤掉 dotfile.
+    """
+    if not _SAMPLE_DATA_DIR.exists() or not any(_SAMPLE_DATA_DIR.iterdir()):
+        pytest.skip("data/raw.sample not provisioned")
+    data = tmp_path / "raw_with_gitkeep"
+    data.mkdir()
+    (data / ".gitkeep").write_text("", encoding="utf-8")
+    stats = ingest_directory(data, tmp_path / "index")
+    assert stats.state == "idle"
+    assert stats.files_total >= 1, (
+        f"expected fallback to raw.sample, got files_total={stats.files_total}"
+    )
+
+
 def test_ingest_missing_sample_returns_idle_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

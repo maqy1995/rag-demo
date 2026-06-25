@@ -103,8 +103,13 @@ def ingest_directory(
     index_dir.mkdir(parents=True, exist_ok=True)
 
     # NB3: fallback — data_dir 不存在或为空 → 试 data/raw.sample/ (NB3 cold-start demo).
-    if not data_dir.exists() or not any(data_dir.iterdir()):
-        if _SAMPLE_DATA_DIR.exists() and any(_SAMPLE_DATA_DIR.iterdir()):
+    # 忽略 dotfile (e.g. .gitkeep) — git 占位文件不算"内容".
+    if not data_dir.exists() or not any(
+        p for p in data_dir.iterdir() if not p.name.startswith(".")
+    ):
+        if _SAMPLE_DATA_DIR.exists() and any(
+            p for p in _SAMPLE_DATA_DIR.iterdir() if not p.name.startswith(".")
+        ):
             data_dir = _SAMPLE_DATA_DIR
         else:
             stats = _empty_stats(duration_ms=0)
