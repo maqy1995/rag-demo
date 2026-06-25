@@ -15,6 +15,7 @@ import argparse
 import signal
 import sys
 import threading
+from collections.abc import Callable
 
 from . import __version__
 
@@ -69,6 +70,40 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     return 0
 
 
+# ── NB4: 后台 ingest 线程 (daemon=False + join 真的等) ─────────
+
+
+def _start_bg_ingest(
+    data_dir: str,
+    index_dir: str,
+    *,
+    ingest_fn: Callable[..., object] | None = None,
+) -> threading.Thread:
+    """启动后台 ingest 线程, 返回 Thread 对象 (daemon=False).
+
+    daemon=False 让 finally.join(timeout) 真的能等到线程跑完 —
+    design §3.7 5 步流程第 4 步"优雅退出"的要求.
+    测试可注入 ingest_fn 模拟慢 ingest.
+    """
+    if ingest_fn is None:
+        from .ingest import ingest_directory as ingest_fn
+
+    def _bg_ingest() -> None:
+        try:
+            stats = ingest_fn(data_dir, index_dir, full=True)
+            print(
+                f"[up] ingest done: state={stats.state} "
+                f"files={stats.files_total} chunks={stats.chunks_total}"
+            )
+        except FileNotFoundError as e:
+            print(f"[up] ingest skipped (data dir missing): {e}")
+        except Exception as e:  # noqa: BLE001 - bg thread safety
+            print(f"[up] ingest error: {e}")
+
+    # NB4: daemon=False 配合 finally.join(timeout=5.0) 让主进程能等到 ingest 跑完
+    return threading.Thread(target=_bg_ingest, daemon=False, name="bg-ingest")
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
     """主入口 (design §3.7 5 步流程):
     1. load_config()
@@ -76,22 +111,14 @@ def _cmd_up(args: argparse.Namespace) -> int:
     3. uvicorn.run(web.app)
     4. SIGINT / SIGTERM 优雅退出
     5. --no-ingest 开关
-
-    在 web app (MAQ-17) 落地前, ImportError 走 fallback: 仅跑 ingest + 等待 SIGINT.
     """
-    import time
-
     # step 1: load_config
     data_dir = args.data
     index_dir = args.index
-    try:
-        from .config import load_config  # MAQ-13 提供
-        cfg = load_config()
-        data_dir = cfg.vault_path or data_dir
-        index_dir = cfg.index_dir or index_dir
-    except (ImportError, AttributeError):
-        # L4 config 尚未落地 / 字段不匹配 — 走 CLI 参数
-        pass
+    from .config import load_config
+    cfg = load_config()
+    data_dir = cfg.vault_path or data_dir
+    index_dir = cfg.index_dir or index_dir
 
     stop_event = threading.Event()
 
@@ -101,55 +128,26 @@ def _cmd_up(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    # step 2: 后台 ingest 线程
+    # step 2: 后台 ingest 线程 (NB4: daemon=False)
     ingest_thread: threading.Thread | None = None
     if not args.no_ingest:
-        from .ingest import ingest_directory
-
-        def _bg_ingest() -> None:
-            try:
-                stats = ingest_directory(data_dir, index_dir, full=True)
-                print(
-                    f"[up] ingest done: state={stats.state} "
-                    f"files={stats.files_total} chunks={stats.chunks_total}"
-                )
-            except FileNotFoundError as e:
-                print(f"[up] ingest skipped (data dir missing): {e}")
-            except Exception as e:  # noqa: BLE001 - bg thread safety
-                print(f"[up] ingest error: {e}")
-
-        ingest_thread = threading.Thread(
-            target=_bg_ingest, daemon=True, name="bg-ingest"
-        )
+        ingest_thread = _start_bg_ingest(data_dir, index_dir)
         ingest_thread.start()
         print(
             f"[up] background ingest started: data={data_dir} index={index_dir}"
         )
 
-    # step 3: uvicorn.run (or fallback if web/main.py not yet implemented)
+    # step 3: uvicorn.run
+    import uvicorn
     try:
-        import uvicorn
         uvicorn.run(
             "rag_demo.web.main:app",
             host=args.host,
             port=args.port,
             log_config=None,
         )
-    except ImportError:
-        # web 尚未落地 (MAQ-17): graceful fallback
-        if args.no_ingest:
-            print("[up] web module not yet implemented (MAQ-17); --no-ingest: exit 0.")
-            return 0
-        print(
-            "[up] web module not yet implemented (MAQ-17); "
-            "waiting for ingest / SIGINT ..."
-        )
-        if ingest_thread is not None:
-            while not stop_event.is_set() and ingest_thread.is_alive():
-                time.sleep(0.5)
-        return 0
     finally:
-        # step 4: 优雅退出
+        # step 4: 优雅退出 — daemon=False 让这里的 join 真的能等到
         stop_event.set()
         if ingest_thread is not None and ingest_thread.is_alive():
             ingest_thread.join(timeout=5.0)

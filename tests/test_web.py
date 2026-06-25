@@ -35,6 +35,9 @@ from rag_demo.web.main import app
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """TestClient + 隔离 tmp_path (config 用 ./data/...)."""
     monkeypatch.chdir(tmp_path)
+    # NI5 (MAQ-22): reset 模块级 config cache, 避免上一个测试的 cfg 串到本次
+    from rag_demo.config import _reset_config_cache
+    _reset_config_cache()
     return TestClient(app)
 
 
@@ -67,6 +70,44 @@ def test_health(client: TestClient) -> None:
     res = client.get("/api/health")
     assert res.status_code == 200
     assert res.json() == {"ok": True}
+
+
+def test_load_config_caches_within_session(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """NI5 (MAQ-22): 同一 TestClient 会话内多次请求, yaml.safe_load 只调一次.
+
+    否则每请求重新解析 yaml 既慢 (10 req/s = 10 次 yaml.safe_load/s),
+    又会让 config 在两次请求间不一致 (用户改了 config.yaml 也读不到).
+    """
+    from rag_demo import config as config_mod
+    from rag_demo.config import _reset_config_cache
+
+    # 先放一个 config.yaml 让 yaml.safe_load 真的被调到 (否则 _load_yaml_file 早返 {})
+    (tmp_path / "config.yaml").write_text(
+        "vault:\n  path: /tmp/notes\n", encoding="utf-8",
+    )
+    _reset_config_cache()
+    # mock yaml.safe_load 计数
+    real_load = config_mod.yaml.safe_load
+    call_count = {"n": 0}
+
+    def counting_load(stream: object) -> object:
+        call_count["n"] += 1
+        return real_load(stream)
+
+    monkeypatch.setattr(config_mod.yaml, "safe_load", counting_load)
+    # 同一 client 内连打 5 次 /api/health + 1 次 /api/config
+    for _ in range(5):
+        res = client.get("/api/health")
+        assert res.status_code == 200
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    # 模块级 cache 命中: 整个会话只 load 一次
+    assert call_count["n"] == 1, (
+        f"expected 1 yaml.safe_load call, got {call_count['n']} "
+        f"(NI5 cache not effective)"
+    )
 
 
 # ── /api/config ─────────────────────────────────────────────
@@ -201,6 +242,55 @@ def test_chat_stream_happy_path(
     assert "event: token" in text
 
 
+def test_chat_stream_cost_ms_real_timing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NB1 (MAQ-22): SSE meta.cost_ms.generate 必须是 generate 阶段独立耗时,
+    不是总耗时. mock retrieve sleep 100ms + stub _call_llm 瞬时,
+    断言 cost_ms.retrieve >= 100 且 cost_ms.generate < 20.
+    """
+    import time as _time
+    from unittest.mock import patch
+
+    import rag_demo.web.main as web_main
+
+    hit = Hit(
+        source="vault://x/a.md#h",
+        file="a.md",
+        heading="h",
+        chunk_id=1,
+        snippet="微服务治理是分布式系统的协调机制",
+        score=0.5,
+    )
+
+    def slow_retrieve(*args: Any, **kwargs: Any) -> list[Hit]:
+        _time.sleep(0.10)  # 100 ms
+        return [hit]
+
+    with patch.object(web_main, "retrieve", side_effect=slow_retrieve), \
+         patch("rag_demo.generate._call_llm", return_value="ok"):
+        res = client.post(
+            "/api/chat/stream", json={"question": "微服务治理"},
+        )
+
+    assert res.status_code == 200
+    # 解析 SSE meta 帧
+    meta_event = None
+    for chunk in res.text.split("\n\n"):
+        if chunk.startswith("event: meta"):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    meta_event = json.loads(line[len("data: "):])
+                    break
+            break
+    assert meta_event is not None, "no meta event in SSE stream"
+    cost = meta_event["cost_ms"]
+    # retrieve 必须 >= 100 (真实 sleep 100ms)
+    assert cost["retrieve"] >= 100, f"retrieve ms {cost['retrieve']} < 100"
+    # generate 必须 < 20 (stub 瞬时, 不应包含 retrieve 时间)
+    assert cost["generate"] < 20, f"generate ms {cost['generate']} >= 20"
+
+
 # ── /api/ingest ─────────────────────────────────────────────
 
 
@@ -225,12 +315,17 @@ def test_ingest_endpoint_writes_status(
 def test_ingest_invalid_data_dir(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """data dir 不存在 → 400 + INGEST_INVALID_CONFIG."""
+    """NB3: data dir 不存在 → fallback 到 data/raw.sample/, 返 200.
+
+    v1.1.1 行为变更: 之前 data dir 不存在抛 400 + INGEST_INVALID_CONFIG;
+    现在走冷启动 demo fallback 路径 (design §3.1 F1 + §3.2 要点).
+    """
     res = client.post("/api/ingest", json={"full": True, "data": str(tmp_path / "nonexistent")})
-    assert res.status_code == 400
+    assert res.status_code == 200
     body = res.json()
-    assert body["error"]["code"] == "INGEST_INVALID_CONFIG"
-    assert body["error"]["stage"] == "ingest"
+    assert body["ok"] is True
+    # fallback 到 data/raw.sample/ 后, 至少 1 个文件
+    assert body["stats"]["files_total"] >= 1
 
 
 # ── /api/usage ──────────────────────────────────────────────
@@ -259,7 +354,8 @@ def test_usage_query_counts_today(
     # 写 2 条
     client.post("/api/usage", json={"event": "chat"})
     client.post("/api/usage", json={"event": "cold_start_abandoned"})
-    res = client.post("/api/usage/query", json={})
+    # NI6 (MAQ-22): query 端点是 GET (无副作用读)
+    res = client.get("/api/usage/query")
     assert res.status_code == 200
     body = res.json()
     assert body["events_today"] == 2

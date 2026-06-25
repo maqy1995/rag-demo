@@ -170,3 +170,30 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     cfg = Path("./config.yaml")
     raw = _load_yaml_file(cfg) if cfg.exists() else _load_yaml_file(Path("./config.example.yaml"))
     return _flatten(_deep_merge(_DEFAULTS, raw))
+
+
+# ── 模块级 cache (NI5, MAQ-22) ─────────────────────────────────
+# 启动时 load_config() 一次, 进程内复用 — 避免每个端点请求都重新解析 yaml.
+# 测试用 _reset_config_cache() / _set_cached_config() 控制隔离.
+
+_cached_config: AppConfig | None = None
+
+
+def get_config() -> AppConfig:
+    """取进程内 cached config; 第一次调用时 load_config() 一次."""
+    global _cached_config
+    if _cached_config is None:
+        _cached_config = load_config()
+    return _cached_config
+
+
+def _reset_config_cache() -> None:
+    """测试用: 清空模块级 cache, 下次 get_config() 会重新 load."""
+    global _cached_config
+    _cached_config = None
+
+
+def _set_cached_config(cfg: AppConfig) -> None:
+    """测试用: 直接设 cache, 跳过 load_config()."""
+    global _cached_config
+    _cached_config = cfg

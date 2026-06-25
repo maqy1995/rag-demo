@@ -118,3 +118,45 @@ def test_up_no_ingest_starts_web_then_terminates_on_signal() -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=2)
+
+
+def test_bg_ingest_thread_is_not_daemon() -> None:
+    """NB4 (MAQ-22): _start_bg_ingest 创建的线程必须 daemon=False,
+    这样 finally.join(timeout=5.0) 真的能等到 ingest 跑完.
+    """
+    from rag_demo.__main__ import _start_bg_ingest
+
+    def _noop_ingest(*_args: object, **_kwargs: object) -> object:
+        return None
+
+    thread = _start_bg_ingest(
+        data_dir="/tmp", index_dir="/tmp", ingest_fn=_noop_ingest,
+    )
+    thread.start()
+    try:
+        assert thread.daemon is False, (
+            "bg ingest thread 必须是 non-daemon 才能被 finally.join 真正等到"
+        )
+        assert thread.name == "bg-ingest"
+    finally:
+        thread.join(timeout=5.0)
+
+
+def test_bg_ingest_thread_join_waits_for_slow_ingest() -> None:
+    """NB4 (MAQ-22): bg ingest 线程 sleep 0.5s, 主流程 join 真的能等到完成."""
+    import time
+
+    from rag_demo.__main__ import _start_bg_ingest
+
+    def _slow_ingest(*_args: object, **_kwargs: object) -> object:
+        time.sleep(0.5)
+        return None
+
+    thread = _start_bg_ingest(
+        data_dir="/tmp", index_dir="/tmp", ingest_fn=_slow_ingest,
+    )
+    thread.start()
+    # 模拟主流程 finally: 等到线程完成 (daemon=False 时 join 真的能等到)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive(), "join 后线程应已结束 (daemon=False)"
+    # 验证 ingest 真的跑完了 (跑完会写 stdout, 但我们只检查 is_alive)

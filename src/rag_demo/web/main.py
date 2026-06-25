@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-import time  # noqa: F401 - 保留: 后续 SSE cost_ms 计时
+import time  # 用于 SSE cost_ms.retrieve / cost_ms.generate 计时 (NB1)
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ..config import load_config
+from ..config import get_config as _cached_config
 from ..errors import AppError
 from ..generate import answer
 from ..ingest import ingest_directory
@@ -103,7 +103,7 @@ def health() -> dict[str, Any]:
 @app.get("/api/config")
 def get_config() -> dict[str, Any]:
     """脱敏 config — effective() 不含 secret (PRD §7.2)."""
-    return load_config().effective()
+    return _cached_config().effective()
 
 
 # ── /api/index/status ───────────────────────────────────────
@@ -112,7 +112,7 @@ def get_config() -> dict[str, Any]:
 @app.get("/api/index/status")
 def index_status() -> Any:
     """读 data/index/status.json (design §3.2 单一信源)."""
-    cfg = load_config()
+    cfg = _cached_config()
     status_path = Path(cfg.index_dir) / "status.json"
     if not status_path.exists():
         return {
@@ -143,7 +143,7 @@ def index_status() -> Any:
 @app.post("/api/search")
 def search(req: SearchRequest) -> dict[str, Any]:
     """纯检索, 不调 LLM (F4 左栏, design §3.6)."""
-    cfg = load_config()
+    cfg = _cached_config()
     try:
         hits = retrieve(
             req.query, index_dir=cfg.index_dir,
@@ -160,7 +160,7 @@ def search(req: SearchRequest) -> dict[str, Any]:
 @app.post("/api/chat")
 def chat(req: ChatRequest) -> Any:
     """非流式问答 (设计 §3.6)."""
-    cfg = load_config()
+    cfg = _cached_config()
     t0 = time.perf_counter()
     try:
         hits = retrieve(
@@ -193,9 +193,10 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         t0 = time.perf_counter()
         try:
             hits = retrieve(
-                req.question, index_dir=load_config().index_dir,
+                req.question, index_dir=_cached_config().index_dir,
                 top_k=req.top_k, filters=req.filters,
             )
+            t_after_retrieve = time.perf_counter()
             result = answer(req.question, hits)
         except AppError as e:
             yield _sse_event("error", {
@@ -203,6 +204,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             })
             return
 
+        retrieve_ms = int((t_after_retrieve - t0) * 1000)
         sources_payload = [_hit_dict(h) for h in result.sources]
         if result.decision in ("RETRIEVE_EMPTY", "NOT_DEFINED"):
             yield _sse_event("token", {"delta": result.answer})
@@ -210,7 +212,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield _sse_event("meta", {
                 "retrieved": len(hits),
                 "decision": result.decision,
-                "cost_ms": {"retrieve": int((time.perf_counter() - t0) * 1000), "generate": 0},
+                "cost_ms": {"retrieve": retrieve_ms, "generate": 0},
             })
             return
 
@@ -219,12 +221,13 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         for i in range(0, len(text), 16):
             yield _sse_event("token", {"delta": text[i : i + 16]})
         yield _sse_event("sources", {"sources": sources_payload})
+        generate_ms = int((time.perf_counter() - t_after_retrieve) * 1000)
         yield _sse_event("meta", {
             "retrieved": len(hits),
             "decision": result.decision,
             "cost_ms": {
-                "retrieve": int((time.perf_counter() - t0) * 1000),
-                "generate": int((time.perf_counter() - t0) * 1000),
+                "retrieve": retrieve_ms,
+                "generate": generate_ms,
             },
         })
 
@@ -237,7 +240,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 @app.post("/api/ingest")
 def ingest(req: IngestRequest) -> Any:
     """触发全量/增量重建 (等价 CLI ingest, design §3.6)."""
-    cfg = load_config()
+    cfg = _cached_config()
     data = req.data or cfg.vault_path or "./data/raw"
     index = req.index or cfg.index_dir
     try:
@@ -280,7 +283,7 @@ def _today_str() -> str:
 @app.post("/api/usage")
 def usage_log(req: UsageEvent) -> Any:
     """埋点写入 data/usage/local-{date}.jsonl (design §3.6 / §8.4)."""
-    cfg = load_config()
+    cfg = _cached_config()
     if not cfg.usage_enabled:
         return {"ok": True, "skipped": True}
     usage_dir = Path(cfg.usage_dir)
@@ -302,10 +305,10 @@ def usage_log(req: UsageEvent) -> Any:
     return {"ok": True}
 
 
-@app.post("/api/usage/query")
+@app.get("/api/usage/query")
 def usage_query() -> dict[str, Any]:
-    """自检: 统计今日事件数 (设计 §3.6 选做)."""
-    cfg = load_config()
+    """自检: 统计今日事件数 (设计 §3.6 选做). NI6: GET 语义 (无副作用读)."""
+    cfg = _cached_config()
     log_path = Path(cfg.usage_dir) / f"local-{_today_str()}.jsonl"
     if not log_path.exists():
         return {"events_today": 0, "abandoned_cold_starts": 0}
@@ -323,18 +326,10 @@ def usage_query() -> dict[str, Any]:
 
 
 # ── 静态文件 ────────────────────────────────────────────────
+# NS4/NS5 (MAQ-22): 占位 HTML 不再在模块导入时 write_text — 挪到
+# scripts/init_static.py (dev-time 一次). 模块级只确保目录存在, 不静默写文件.
+# 缺 index.html 时 GET / 返 404 (不静默创建).
 
 _STATIC_DIR.mkdir(parents=True, exist_ok=True)
-_STATIC_INDEX = _STATIC_DIR / "index.html"
-if not _STATIC_INDEX.exists():
-    _STATIC_INDEX.write_text(
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<title>rag-demo</title></head><body>"
-        "<h1>rag-demo</h1>"
-        "<p>API available at <code>/api/health</code> etc.</p>"
-        "<p>Static index placeholder — see MAQ-18 for full cold-start UI.</p>"
-        "</body></html>",
-        encoding="utf-8",
-    )
 
 app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
