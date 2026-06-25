@@ -45,6 +45,8 @@ dev = [
     # ADR-0001 §"测试改动": tests/test_llm_base.py 用 mock.patch("openai.OpenAI").
     # dev extras 装 openai, 测试环境无需 `uv sync --extra llm` 也能跑测试.
     "openai>=1.30",
+    # MAQ-42 e2e test 需要 requests 跑子进程拉端点
+    "requests>=2.31",
 ]
 
 [project.scripts]
@@ -75,5 +77,8 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not e2e'"
 asyncio_mode = "auto"
+markers = [
+    "e2e: end-to-end tests (run with pytest -m e2e; default pytest skips them)",
+]
