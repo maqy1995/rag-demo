@@ -11,23 +11,40 @@
 <body>
 <div id="app">
   <header>
-    <h1><span class="icon">📚</span> 知识库问答</h1>
+    <div class="header-left">
+      <h1><span class="icon">📚</span> 知识库问答</h1>
+    </div>
     <div class="config">
-      <span>{{ config.vault?.name || '...' }}</span>
-      <span class="sep"></span>
-      <span>LLM: {{ config.generate?.llm?.provider || '...' }}</span>
-      <span class="sep"></span>
-      <span>Embed: {{ config.generate?.embedding?.provider || '...' }}</span>
+      <span class="config-item">
+        <span class="config-label">Vault</span>
+        <span class="config-value">{{ config.vault?.name || '...' }}</span>
+      </span>
+      <span class="config-divider"></span>
+      <span class="config-item">
+        <span class="config-label">LLM</span>
+        <span class="config-value">{{ config.generate?.llm?.provider || '...' }}</span>
+      </span>
+      <span class="config-divider"></span>
+      <span class="config-item">
+        <span class="config-label">Embed</span>
+        <span class="config-value">{{ config.generate?.embedding?.provider || '...' }}</span>
+      </span>
     </div>
   </header>
 
   <main>
     <!-- 左栏: Search -->
     <section class="panel">
-      <div class="panel-title"><span class="icon">🔍</span> Search — Top-K 召回</div>
+      <div class="panel-title">
+        <span class="icon">🔍</span>
+        <span>Top-K 召回</span>
+      </div>
       <div class="input-row">
-        <input type="text" v-model="query" @keyup.enter="doSearch" placeholder="输入关键词...">
-        <button class="btn btn-primary" @click="doSearch" :disabled="!query.trim()">Search</button>
+        <input type="text" v-model="query" @keyup.enter="doSearch" placeholder="输入关键词搜索..." class="search-input">
+        <button class="btn btn-primary" @click="doSearch" :disabled="!query.trim()">
+          <span v-if="searching" class="spinner"></span>
+          <span v-else>Search</span>
+        </button>
       </div>
       <ul class="hit-list">
         <li v-for="(hit, i) in hits" :key="i" class="hit" @click="askFromHit(hit)">
@@ -35,37 +52,52 @@
             <span class="hit-heading">{{ hit.heading || '(无标题)' }}</span>
             <span class="hit-score">{{ hit.score.toFixed(3) }}</span>
           </div>
-          <div class="hit-snippet">{{ hit.snippet.slice(0, 80) }}{{ hit.snippet.length > 80 ? '…' : '' }}</div>
+          <div class="hit-snippet">{{ hit.snippet.slice(0, 100) }}{{ hit.snippet.length > 100 ? '…' : '' }}</div>
           <div class="hit-file">{{ hit.file }}</div>
         </li>
         <li v-if="hits.length === 0" class="empty-hint">
-          {{ searchMessage || '试试下面的示例问题，或输入关键词搜索' }}
+          <div class="empty-icon">🔎</div>
+          <div class="empty-text">{{ searchMessage || '输入关键词开始搜索' }}</div>
         </li>
       </ul>
     </section>
 
     <!-- 右栏: Ask -->
     <section class="panel">
-      <div class="panel-title"><span class="icon">💬</span> Ask — 基于笔记问答</div>
-      <div class="examples">
-        <button v-for="q in exampleQuestions" :key="q" class="btn" @click="doAsk(q)">{{ q }}</button>
+      <div class="panel-title">
+        <span class="icon">💬</span>
+        <span>基于笔记问答</span>
       </div>
-      <textarea v-model="question" @keydown.ctrl.enter="doAsk()" placeholder="输入问题，Ctrl+Enter 提交..." rows="2"></textarea>
-      <button class="btn btn-primary" @click="doAsk()" :disabled="!question.trim() || asking" style="margin-top: 8px;">
-        {{ asking ? '生成中...' : 'Ask (流式)' }}
-      </button>
+      <div class="examples">
+        <button v-for="q in exampleQuestions" :key="q" class="btn btn-chip" @click="doAsk(q)">{{ q }}</button>
+      </div>
+      <div class="textarea-wrapper">
+        <textarea v-model="question" @keydown.ctrl.enter="doAsk()" placeholder="输入问题，Ctrl+Enter 提交..." rows="3"></textarea>
+        <button class="btn btn-primary btn-ask" @click="doAsk()" :disabled="!question.trim() || asking">
+          <span v-if="asking" class="spinner"></span>
+          <span v-else>Ask</span>
+        </button>
+      </div>
       <div class="answer-area" v-html="answerHtml"></div>
       <div v-if="lastDecision" class="meta-bar">
-        <span>decision: <span class="decision" :class="lastDecision">{{ lastDecision }}</span></span>
-        <span>cost: {{ lastCost.retrieve }}ms retrieve + {{ lastCost.generate }}ms generate</span>
+        <span class="meta-item">
+          <span class="meta-label">Decision</span>
+          <span class="decision" :class="lastDecision">{{ lastDecision }}</span>
+        </span>
+        <span class="meta-item">
+          <span class="meta-label">Cost</span>
+          <span class="meta-value">{{ lastCost.retrieve }}ms + {{ lastCost.generate }}ms</span>
+        </span>
       </div>
       <details v-if="sources.length" class="sources-toggle">
-        <summary>📎 {{ sources.length }} 条引用</summary>
+        <summary>📎 {{ sources.length }} 条引用来源</summary>
         <ul class="sources-list">
           <li v-for="(src, i) in sources" :key="i" class="source-item">
-            <strong>[{{ i + 1 }}]</strong>
-            <span class="source-file">{{ src.file }}#{{ src.heading }}</span>
-            <div class="snippet">{{ src.snippet }}</div>
+            <div class="source-header">
+              <span class="source-index">[{{ i + 1 }}]</span>
+              <span class="source-file">{{ src.file }}#{{ src.heading }}</span>
+            </div>
+            <div class="source-snippet">{{ src.snippet }}</div>
           </li>
         </ul>
       </details>
@@ -74,17 +106,16 @@
 
   <footer>
     <div class="footer-status">
-      索引状态:
       <span class="state-dot" :class="status.state"></span>
-      <span>{{ status.state }}</span>
-      <span v-if="status.current_progress">
+      <span class="state-label">索引状态: {{ status.state }}</span>
+      <span v-if="status.current_progress" class="state-progress">
         ({{ status.current_progress.done }}/{{ status.current_progress.total }})
       </span>
     </div>
     <div class="footer-right">
-      <span>chunks: {{ status.chunks_total || 0 }}</span>
-      <span>files: {{ status.files_total || 0 }}</span>
-      <span>v1.2</span>
+      <span class="stat-item">chunks: {{ status.chunks_total || 0 }}</span>
+      <span class="stat-item">files: {{ status.files_total || 0 }}</span>
+      <span class="version">v2.0</span>
     </div>
   </footer>
 </div>
@@ -98,6 +129,7 @@ createApp({
     const query = ref('');
     const hits = ref([]);
     const searchMessage = ref('');
+    const searching = ref(false);
     const question = ref('');
     const answer = ref('');
     const sources = ref([]);
@@ -136,6 +168,7 @@ createApp({
 
     async function doSearch() {
       if (!query.value.trim()) return;
+      searching.value = true;
       try {
         const r = await fetch('/api/search', {
           method: 'POST',
@@ -147,6 +180,8 @@ createApp({
         searchMessage.value = hits.value.length === 0 ? '未找到相关内容' : '';
       } catch (e) {
         searchMessage.value = '搜索失败: ' + e.message;
+      } finally {
+        searching.value = false;
       }
     }
 
@@ -208,7 +243,7 @@ createApp({
     });
 
     return {
-      config, query, hits, searchMessage, question, answer, sources,
+      config, query, hits, searchMessage, searching, question, answer, sources,
       asking, lastDecision, lastCost, status, exampleQuestions,
       answerHtml, doSearch, doAsk, askFromHit,
     };
