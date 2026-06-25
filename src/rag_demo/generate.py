@@ -1,27 +1,36 @@
-"""Generate: answer stage with US4 / US6 / happy-path decision chain.
+"""Generate: answer stage with US4 / US6 / happy-path decision chain + 真 LLM.
 
 v1 contract — `docs/dev/design.md` §3.5:
   1. `hits` empty -> decision=RETRIEVE_EMPTY (LLM NOT called)
   2. `defined_checker(q, hits) == False` -> decision=NOT_DEFINED (LLM NOT called)
   3. otherwise -> call _call_llm(q, hits) -> decision=GENERATED
 
-`_call_llm` is exposed at module level so tests can patch it via
-`unittest.mock.patch("rag_demo.generate._call_llm", mock)`. This is the
-injection point described in design §9.2 (assertion strength discipline):
-US4 / US6 tests pass `unreachable_llm = MagicMock(side_effect=AssertionError(...))`
-to ensure the LLM is never silently called on the early-return paths.
+MAQ-36 落地:
+  - `_call_llm` 替换为 `BaseLlmClient.stream(question, hits)` 流式调用
+  - 保持模块级, 测试用 `unittest.mock.patch("rag_demo.generate._call_llm")`
+  - 保持 `_call_llm` 签名 `(question: str, hits: list[Hit]) -> str` — 调用方用 `.join()` 拼流
+  - 默认 _call_llm 是 None, 通过 `set_llm_client(client)` 注入 (模块级单例)
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .llm import BaseLlmClient
 from .retrieve import Hit
 from .validate import DefinedCheck, is_defined_in_hits
 
-# 设计 §3.5: 可注入的判定函数签名 (与 validate.DefinedCheck 兼容)
-# —— 历史: MAQ-11 stub 阶段用 `lambda q, h: True` 占位, MAQ-12 起改用
-# validate.is_defined_in_hits 作为默认 (PRD §8.2 v0.3 NB1 修复路径).
+# 模块级 LLM client 单例 — 由 web/__main__/ingest 启动时 set_llm_client() 注入
+_llm_client: BaseLlmClient | None = None
+
+
+def set_llm_client(client: BaseLlmClient | None) -> None:
+    """注入 LLM client (None 表示 stub 模式, _call_llm 返拼接字符串)."""
+    global _llm_client
+    _llm_client = client
+
+
+def get_llm_client() -> BaseLlmClient | None:
+    return _llm_client
 
 
 @dataclass(frozen=True)
@@ -34,12 +43,16 @@ class AnswerResult:
 
 
 def _call_llm(question: str, hits: list[Hit]) -> str:
-    """Stub LLM call. Replace with real provider once ADR-0001 / ADR-0003 land.
+    """调 LLM. 有 client 时 stream + join; 无 client 时返 stub 拼接字符串.
 
-    Module-level so tests can patch it (design §9.2).
+    模块级函数 — 测试用 `unittest.mock.patch("rag_demo.generate._call_llm")` mock.
     """
-    ctx = "\n\n".join(h.snippet for h in hits)
-    return f"[stub-llm] answer for: {question!r}\n\nContext:\n{ctx}"
+    if _llm_client is None:
+        # stub 模式 (per v1 design §3.5 旧行为): 返拼接字符串, 不发请求
+        ctx = "\n\n".join(h.snippet for h in hits)
+        return f"[stub-llm] answer for: {question!r}\n\nContext:\n{ctx}"
+    # 真 LLM stream → join 成完整答案
+    return "".join(_llm_client.stream(question, hits))
 
 
 def answer(

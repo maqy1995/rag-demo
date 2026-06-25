@@ -21,8 +21,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from ..retrieve import Hit
+if TYPE_CHECKING:
+    from ..retrieve import Hit  # noqa: F401  -- 仅类型, 避免循环 import
 
 # ADR-0001 §"接口签名": 4 家 OpenAI 兼容 provider (锁死, 新增须走 ADR-0003).
 # 与 owner 拍板 (MAQ-25 评论 d560c6ca-…) 一致: OpenAI / 智谱 / MiniMax / 小米 Mimo.

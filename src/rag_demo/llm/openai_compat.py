@@ -23,13 +23,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import openai
 
 from ..errors import AppError, raise_error
-from ..retrieve import Hit
 from .base import BaseEmbedder, BaseLlmClient, EmbedConfig, LLMConfig
+
+if TYPE_CHECKING:
+    from ..retrieve import Hit  # noqa: F401  -- 仅类型, 避免循环 import
 
 # 触发自动重试的 HTTP status. 401/403 不重试 (key 错重试也没用).
 _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})

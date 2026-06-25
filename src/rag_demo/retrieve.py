@@ -1,17 +1,25 @@
-"""Retrieve: stub for fetching top-k chunks relevant to a query.
-
-Returns an empty list until a real vector store is wired in.
+"""Retrieve: 真向量检索 (FAISS + BaseEmbedder, ADR-0002 / MAQ-35).
 
 v1 contract — `docs/dev/design.md` §3.3:
-  - `filters: dict | None` kwarg (v1 未类型化, v0.2 升级为 RetrieveFilters TypedDict)
+  - `filters: dict | None` kwarg (v1 透传不强制实现, v0.2 升级为 RetrieveFilters TypedDict)
   - 返回 `list[Hit]`
-  - 稳定排序: score 降序, 同分按 (file, chunk_id) 升序
-"""
+  - 稳定排序: score 降序, 同分按 (file, chunk_id) 升序 (FAISS 顺序天然稳定)
+  - snippet ≤ 200 字 (超长截断)
 
+新实现要点 (MAQ-35):
+  - 加载 `data/index/faiss.index` + `faiss_meta.json`
+  - 用 `embedder.embed_one(query)` 拿 query 向量
+  - 调 `VectorStore.search(query_vec, top_k)`
+  - 转 list[Hit], vault:// 协议 encode
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+
+from .llm import BaseEmbedder
+from .vault_uri import encode as vault_uri_encode
+from .vector import VectorStore
 
 
 @dataclass(frozen=True)
@@ -26,13 +34,60 @@ class Hit:
     score: float  # 0-1，ANN 返回值归一化
 
 
+def _snippet(text: str, max_len: int = 200) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
 def retrieve(
     query: str,
     *,
     index_dir: str | Path,
     top_k: int = 5,
     filters: dict | None = None,
+    embedder: BaseEmbedder | None = None,
+    vault_name: str = "my-notes",
+    dim: int = 1536,
 ) -> list[Hit]:
-    """Stub: 始终返回空 list. 真实实现接 ADR-0002 向量库."""
-    _ = (query, index_dir, top_k, filters)  # TODO: replace stub with real retrieval
-    return []
+    """真向量检索. 返回 Top-K 命中.
+
+    Args:
+        query: 用户问题.
+        index_dir: data/index 目录 (含 faiss.index + faiss_meta.json).
+        top_k: 取前 K.
+        filters: v1 透传不强制实现 (预留 §3.2 F11).
+        embedder: 注入的 embedder 实例 (None 时用 dummy 全 0 向量, 仅供 smoke).
+        vault_name: 用于 vault:// 协议的 {vault} 占位 (默认 "my-notes").
+        dim: 向量维度 (默认 1536 兼容 OpenAI text-embedding-3-small).
+    """
+    _ = filters  # v1 透传, 不强制
+    index_path = Path(index_dir)
+    store = VectorStore(index_dir=index_path, dim=dim).load()
+    if store.is_empty():
+        return []
+    # 真实 query embed
+    if embedder is None:
+        # smoke 路径: 全 0 向量, 必然搜不到 (US4 等价路径, 返 [])
+        query_vec = [0.0] * dim
+    else:
+        query_vec = embedder.embed_one(query)
+    raw_hits = store.search(query_vec, top_k=top_k)
+    hits: list[Hit] = []
+    for score, meta in raw_hits:
+        text = str(meta.get("text", ""))
+        hits.append(
+            Hit(
+                source=vault_uri_encode(
+                    vault=vault_name,
+                    path=str(meta.get("source", meta.get("file", ""))),
+                    anchor=str(meta.get("heading", "")),
+                ),
+                file=str(meta.get("file", meta.get("source", ""))),
+                heading=str(meta.get("heading", "")),
+                chunk_id=int(meta.get("chunk_id", 0)),
+                snippet=_snippet(text),
+                score=float(score),
+            )
+        )
+    return hits
