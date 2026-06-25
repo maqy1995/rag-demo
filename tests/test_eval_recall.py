@@ -6,6 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.eval
+
 
 def test_eval_recall_smoke_runs():
     """跑默认 5 条样例, 不崩."""

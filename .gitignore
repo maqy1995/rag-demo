@@ -54,3 +54,5 @@ dist/
 .agent_context/
 .multica/
 .worktrees/
+# Multica runtime 自动塞给 agent 的指令副本（含 agent ID），不是项目代码
+AGENTS.md

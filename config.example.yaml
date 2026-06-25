@@ -1,0 +1,20 @@
+# ───── RAG demo config example ─────
+# Copy to config.yaml and edit. .env.example 是敏感字段（API key），
+# 这里的非敏感字段独立管理。
+
+# 空 vault → cold-start 自动 fallback 到 data/raw.sample/ 5 篇
+vault:
+  path: ""
+  name: "my-notes"
+  include_extensions: [".md", ".txt"]
+
+# provider 列表见 docs/adr/0003-llm-embedding-source.md
+# 这里只列最常用的一组；其余字段（chunk_size / top_k 等）走内置默认
+generate:
+  llm:
+    provider: "openai"
+    model: "gpt-4o-mini"
+    base_url: "https://api.openai.com/v1"
+  embedding:
+    provider: "openai"
+    model: "text-embedding-3-small"

@@ -27,6 +27,9 @@ llamaindex = ["llama-index>=0.10", "llama-index-embeddings-openai>=0.2"]
 faiss    = ["faiss-cpu>=1.8"]
 chroma   = ["chromadb>=0.5"]
 
+# Meta-extra: 默认向量库 (FAISS). v1.2 README 快速上手用 `--extra vector`.
+vector   = ["faiss-cpu>=1.8"]
+
 # Embedding / LLM clients — only enabled if the user has the keys.
 openai   = ["openai>=1.40"]
 anthropic = ["anthropic>=0.30"]
@@ -34,6 +37,10 @@ anthropic = ["anthropic>=0.30"]
 # ADR-0001 §"pyproject.toml": LLM stub (直裸 OpenAI 兼容 SDK).
 # 装上后才能 `import openai`; 测试 mock.patch("openai.OpenAI") 也需要 openai 已装.
 llm      = ["openai>=1.30", "httpx>=0.27"]
+
+# Meta-extra: Web 入口 (FastAPI + uvicorn). fastapi 已在默认 deps, 这里只是
+# 提供语义化 alias 给 README 的快速上手命令 (`--extra web`).
+web      = []
 
 # Dev / lint:
 dev = [
@@ -81,4 +88,5 @@ addopts = "-ra -m 'not e2e'"
 asyncio_mode = "auto"
 markers = [
     "e2e: end-to-end tests (run with pytest -m e2e; default pytest skips them)",
+    "eval: Recall@K evaluation harness tests (run with pytest -m eval)",
 ]

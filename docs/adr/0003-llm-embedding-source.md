@@ -130,6 +130,21 @@ class BaseEmbedder:
 
 > （暂无。Reviewer 复审时若有反对意见，按时间倒序记在这里。）
 
+## 拼写约定（MIMAX vs MiniMax）
+
+> 由 [MAQ-44 review 反馈](mention://issue/f47fbe2d-02f8-48f0-a05d-c28dc8d6062a) 补记（2026-06-25）
+
+本仓为了避免 Python 标识符与官方品牌名冲突、以及让 `valid_provider` 校验不踩编码坑，**统一把 MiniMax（稀宇科技）拼作 `MIMAX`**：
+
+- API key 环境变量：`MIMAX_API_KEY`（而非 `MINIMAX_API_KEY`）
+- 配置 `provider` 字段：`minimax`（小写、无连字符）
+- `VALID_LLM_PROVIDERS` 集合成员：`"minimax"`
+- 代码标识符（包名、模块名、变量名）：`minimax` / `MIMAX`
+
+对外展示（README、release notes、user-facing 错误消息）保留 `MiniMax` 写法以与公司名一致。混用是有意为之，**不是 bug**。
+
+> 历史 review 中有人提议改回 `MiniMax` / `minimax` / `MINIMAX_API_KEY`，owner 在 MAQ-25 评论 `d560c6ca-…` 拍板"按现有命名走，文档里写明约定即可"，故沿用至今。
+
 ## 跨文档引用
 
 - 父 issue：[MAQ-28](mention://issue/89764482-428b-4fa5-9c8a-385859e9423f)
