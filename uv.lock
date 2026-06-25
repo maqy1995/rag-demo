@@ -1791,6 +1791,7 @@ chroma = [
 ]
 dev = [
     { name = "mypy" },
+    { name = "openai" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1808,6 +1809,10 @@ llamaindex = [
     { name = "llama-index" },
     { name = "llama-index-embeddings-openai" },
 ]
+llm = [
+    { name = "httpx" },
+    { name = "openai" },
+]
 openai = [
     { name = "openai" },
 ]
@@ -1819,12 +1824,15 @@ requires-dist = [
     { name = "faiss-cpu", marker = "extra == 'faiss'", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.27" },
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=0.2" },
     { name = "langchain-community", marker = "extra == 'langchain'", specifier = ">=0.2" },
     { name = "langchain-openai", marker = "extra == 'langchain'", specifier = ">=0.1" },
     { name = "llama-index", marker = "extra == 'llamaindex'", specifier = ">=0.10" },
     { name = "llama-index-embeddings-openai", marker = "extra == 'llamaindex'", specifier = ">=0.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "openai", marker = "extra == 'dev'", specifier = ">=1.30" },
+    { name = "openai", marker = "extra == 'llm'", specifier = ">=1.30" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.40" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
@@ -1835,7 +1843,7 @@ requires-dist = [
     { name = "types-requests", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
-provides-extras = ["langchain", "llamaindex", "faiss", "chroma", "openai", "anthropic", "dev"]
+provides-extras = ["langchain", "llamaindex", "faiss", "chroma", "openai", "anthropic", "llm", "dev"]
 
 [[package]]
 name = "referencing"

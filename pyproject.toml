@@ -31,6 +31,10 @@ chroma   = ["chromadb>=0.5"]
 openai   = ["openai>=1.40"]
 anthropic = ["anthropic>=0.30"]
 
+# ADR-0001 §"pyproject.toml": LLM stub (直裸 OpenAI 兼容 SDK).
+# 装上后才能 `import openai`; 测试 mock.patch("openai.OpenAI") 也需要 openai 已装.
+llm      = ["openai>=1.30", "httpx>=0.27"]
+
 # Dev / lint:
 dev = [
     "pytest>=8.2",
@@ -38,6 +42,9 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
     "types-requests",
+    # ADR-0001 §"测试改动": tests/test_llm_base.py 用 mock.patch("openai.OpenAI").
+    # dev extras 装 openai, 测试环境无需 `uv sync --extra llm` 也能跑测试.
+    "openai>=1.30",
 ]
 
 [project.scripts]

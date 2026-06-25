@@ -44,6 +44,10 @@ ERROR_CODES: dict[str, dict] = {
     "NOT_DEFINED":               {"http_status": 200, "stage": "generate", "message": "你的笔记里没找到 {query} 的明确定义", "is_decision": True},
     "GENERATE_LLM_FAIL":         {"http_status": 503, "stage": "generate", "message": "LLM 调用失败"},
     "GENERATE_INVALID_QUESTION": {"http_status": 400, "stage": "generate", "message": "问题参数非法"},
+    # ADR-0001 §"修改模块": embedding 错误独立成码 (LLM 复用 GENERATE_LLM_FAIL).
+    # stage=ingest 因为 embedding 是 ingest 阶段调用; 真实 HTTP status 由 openai_compat
+    # 按 e.status_code 透传, 这里只是兜底默认值 (503).
+    "EMBEDDING_FAIL":            {"http_status": 503, "stage": "ingest", "message": "embedding 调用失败"},
     "CONFIG_LOAD_FAIL":          {"http_status": 500, "stage": "infra", "message": "config 加载失败"},
     "USAGE_LOG_FAIL":            {"http_status": 500, "stage": "infra", "message": "埋点写入失败"},
 }
