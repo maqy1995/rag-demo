@@ -147,6 +147,18 @@ def test_ingest_dir_with_only_dotfiles_falls_back(tmp_path: Path) -> None:
     )
 
 
+def test_ingest_dir_with_real_files_and_dotfile_does_not_fall_back(tmp_path: Path) -> None:
+    """回归 (MAQ-46 follow-up): 真实 .md + dotfile 共存 → 走 ingest，不走 fallback."""
+    data = tmp_path / "raw"
+    data.mkdir()
+    (data / "real.md").write_text("hello world " * 30, encoding="utf-8")
+    (data / ".gitkeep").write_text("", encoding="utf-8")
+    stats = ingest_directory(data, tmp_path / "index")
+    assert stats.state == "idle"
+    assert stats.files_total == 1
+    assert stats.chunks_total >= 1
+
+
 def test_ingest_missing_sample_returns_idle_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
