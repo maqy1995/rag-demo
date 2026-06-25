@@ -1,1 +1,246 @@
-<!DOCTYPE html><html><head><meta charset='utf-8'><title>rag-demo</title></head><body><h1>rag-demo</h1><p>API available at <code>/api/health</code> etc.</p><p>Static index placeholder — see MAQ-18 for full cold-start UI.</p></body></html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>知识库问答 — Knowledge-Base QA</title>
+<script src="https://unpkg.com/vue@3"></script>
+<script src="https://unpkg.com/marked"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #f7f8fa; color: #222; }
+  #app { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+  header { background: #2c3e50; color: #fff; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; }
+  header .config { font-size: 12px; opacity: 0.8; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; overflow: hidden; }
+  .panel { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); display: flex; flex-direction: column; overflow: hidden; }
+  .panel h2 { font-size: 14px; color: #666; margin-bottom: 12px; }
+  input, textarea, button { font-family: inherit; font-size: 14px; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; }
+  textarea { resize: vertical; min-height: 60px; }
+  button { background: #2c3e50; color: #fff; cursor: pointer; border: none; }
+  button:hover { background: #34495e; }
+  button:disabled { background: #95a5a6; cursor: not-allowed; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .examples button { background: #ecf0f1; color: #2c3e50; font-size: 12px; }
+  .examples button:hover { background: #bdc3c7; }
+  ul { list-style: none; overflow-y: auto; flex: 1; }
+  .hit, .source { padding: 12px; border: 1px solid #eee; border-radius: 6px; margin-bottom: 8px; cursor: pointer; }
+  .hit:hover { background: #f0f7ff; }
+  .hit .heading { font-weight: bold; color: #2c3e50; }
+  .hit .score { float: right; font-size: 12px; color: #16a085; }
+  .hit .snippet { font-size: 13px; color: #555; margin-top: 4px; }
+  .answer { flex: 1; overflow-y: auto; padding: 12px; background: #fafafa; border-radius: 6px; min-height: 200px; }
+  .answer pre { background: #f4f4f4; padding: 8px; border-radius: 4px; overflow-x: auto; }
+  .answer code { background: #f4f4f4; padding: 2px 4px; border-radius: 3px; }
+  .decision { font-size: 12px; padding: 4px 8px; border-radius: 4px; margin-left: 8px; }
+  .decision.GENERATED { background: #d4edda; color: #155724; }
+  .decision.RETRIEVE_EMPTY { background: #f8d7da; color: #721c24; }
+  .decision.NOT_DEFINED { background: #fff3cd; color: #856404; }
+  footer { background: #34495e; color: #fff; padding: 8px 20px; font-size: 12px; display: flex; justify-content: space-between; }
+  footer .state.idle { color: #2ecc71; }
+  footer .state.building { color: #f39c12; }
+  footer .state.error { color: #e74c3c; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>📚 知识库问答 — Knowledge-Base QA</h1>
+    <div class="config">
+      {{ config.vault?.name || '...' }} ·
+      LLM: {{ config.generate?.llm?.provider || '...' }} ·
+      Embed: {{ config.generate?.embedding?.provider || '...' }}
+    </div>
+  </header>
+
+  <main>
+    <!-- 左栏: Search -->
+    <section class="panel">
+      <h2>🔍 Search (Top-K 召回)</h2>
+      <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+        <input v-model="query" @keyup.enter="doSearch" placeholder="输入关键词..." style="flex: 1;">
+        <button @click="doSearch" :disabled="!query.trim()">Search</button>
+      </div>
+      <ul>
+        <li v-for="(hit, i) in hits" :key="i" class="hit" @click="askFromHit(hit)">
+          <div>
+            <span class="heading">{{ hit.heading || '(无标题)' }}</span>
+            <span class="score">{{ hit.score.toFixed(3) }}</span>
+          </div>
+          <div class="snippet">{{ hit.snippet.slice(0, 80) }}{{ hit.snippet.length > 80 ? '…' : '' }}</div>
+          <div style="font-size: 11px; color: #999; margin-top: 4px;">{{ hit.file }}</div>
+        </li>
+        <li v-if="hits.length === 0" style="color: #999; text-align: center; padding: 20px;">
+          {{ searchMessage || '试试上面的 5 条示例问题，或输入关键词' }}
+        </li>
+      </ul>
+    </section>
+
+    <!-- 右栏: Ask -->
+    <section class="panel">
+      <h2>💬 Ask (基于笔记问答)</h2>
+      <div class="examples">
+        <button v-for="q in exampleQuestions" :key="q" @click="doAsk(q)">{{ q }}</button>
+      </div>
+      <textarea v-model="question" @keydown.ctrl.enter="doAsk" placeholder="输入问题，Ctrl+Enter 提交..." rows="2"></textarea>
+      <button @click="doAsk()" :disabled="!question.trim() || asking" style="margin-top: 8px;">
+        {{ asking ? '生成中...' : 'Ask (流式)' }}
+      </button>
+      <div class="answer" v-html="answerHtml" style="margin-top: 12px;"></div>
+      <div v-if="lastDecision" style="margin-top: 8px; font-size: 12px;">
+        decision: <span class="decision" :class="lastDecision">{{ lastDecision }}</span>
+        <span style="margin-left: 12px;">cost: {{ lastCost.retrieve }}ms retrieve + {{ lastCost.generate }}ms generate</span>
+      </div>
+      <details v-if="sources.length" style="margin-top: 12px;">
+        <summary>📎 {{ sources.length }} 条引用</summary>
+        <ul style="margin-top: 8px; max-height: 200px;">
+          <li v-for="(src, i) in sources" :key="i" class="source">
+            <strong>[{{ i + 1 }}]</strong> {{ src.file }}#{{ src.heading }}
+            <div class="snippet">{{ src.snippet }}</div>
+          </li>
+        </ul>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <span>索引状态:
+      <span class="state" :class="status.state">{{ status.state }}</span>
+      <span v-if="status.current_progress">
+        ({{ status.current_progress.done }}/{{ status.current_progress.total }})
+      </span>
+    </span>
+    <span>chunks: {{ status.chunks_total || 0 }} · files: {{ status.files_total || 0 }}</span>
+    <span>v1.2 · 4 OpenAI-compatible providers</span>
+  </footer>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+
+createApp({
+  setup() {
+    const config = ref({});
+    const query = ref('');
+    const hits = ref([]);
+    const searchMessage = ref('');
+    const question = ref('');
+    const answer = ref('');
+    const sources = ref([]);
+    const asking = ref(false);
+    const lastDecision = ref('');
+    const lastCost = ref({ retrieve: 0, generate: 0 });
+    const status = ref({ state: 'idle', chunks_total: 0, files_total: 0 });
+
+    // 5 条示例问题 (依赖 S1 解锁前先硬编码; 解锁后由产品替换)
+    const exampleQuestions = [
+      '微服务治理是怎么定义的？',
+      '服务发现是什么？',
+      '怎么切换 LLM provider？',
+      '冷启动 demo 是怎么做的？',
+      '怎么评估检索质量？',
+    ];
+
+    const answerHtml = computed(() => marked.parse(answer.value || '_等待问题_'));
+
+    async function fetchConfig() {
+      try {
+        const r = await fetch('/api/config');
+        config.value = await r.json();
+      } catch (e) {
+        console.error('config fetch failed', e);
+      }
+    }
+
+    async function fetchStatus() {
+      try {
+        const r = await fetch('/api/index/status');
+        status.value = await r.json();
+      } catch (e) {
+        console.error('status fetch failed', e);
+      }
+    }
+
+    async function doSearch() {
+      if (!query.value.trim()) return;
+      try {
+        const r = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query.value, top_k: 5 }),
+        });
+        const data = await r.json();
+        hits.value = data.hits || [];
+        searchMessage.value = hits.value.length === 0 ? '未找到相关内容' : '';
+      } catch (e) {
+        searchMessage.value = '搜索失败: ' + e.message;
+      }
+    }
+
+    function askFromHit(hit) {
+      question.value = `${hit.heading || hit.file} 是什么？`;
+      doAsk();
+    }
+
+    async function doAsk(q) {
+      if (q) question.value = q;
+      if (!question.value.trim() || asking.value) return;
+      asking.value = true;
+      answer.value = '';
+      sources.value = [];
+      lastDecision.value = '';
+      try {
+        const r = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: question.value, top_k: 5 }),
+        });
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const events = buf.split('\n\n');
+          buf = events.pop() || '';
+          for (const ev of events) {
+            const lines = ev.split('\n');
+            let event = '', data = '';
+            for (const line of lines) {
+              if (line.startsWith('event: ')) event = line.slice(7).trim();
+              else if (line.startsWith('data: ')) data += line.slice(6);
+            }
+            if (!data) continue;
+            const payload = JSON.parse(data);
+            if (event === 'token') answer.value += payload.delta;
+            else if (event === 'sources') sources.value = payload.sources || [];
+            else if (event === 'meta') {
+              lastDecision.value = payload.decision;
+              lastCost.value = payload.cost_ms;
+            }
+          }
+        }
+      } catch (e) {
+        answer.value = '**错误**: ' + e.message;
+      } finally {
+        asking.value = false;
+      }
+    }
+
+    onMounted(() => {
+      fetchConfig();
+      fetchStatus();
+      setInterval(fetchStatus, 3000);
+    });
+
+    return {
+      config, query, hits, searchMessage, question, answer, sources,
+      asking, lastDecision, lastCost, status, exampleQuestions,
+      answerHtml, doSearch, doAsk, askFromHit,
+    };
+  },
+}).mount('#app');
+</script>
+</body>
+</html>
