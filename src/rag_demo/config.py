@@ -24,8 +24,8 @@ _DEFAULTS: dict[str, Any] = {
     "ingest": {"chunk_size": 500, "chunk_overlap": 80, "full": True},
     "retrieve": {"top_k": 5, "filters": {}},
     "generate": {
-        "llm": {"provider": "ollama", "model": "qwen2.5", "base_url": "http://localhost:11434"},
-        "embedding": {"provider": "ollama", "model": "nomic-embed-text"},
+        "llm": {"provider": "minimax", "model": "MiniMax-M3", "base_url": "https://api.MiniMax.chat/v1/"},
+        "embedding": {"provider": "zhipu", "model": "embedding-3"},
         "defined_check_pattern": "",
     },
     "web": {"host": "127.0.0.1", "port": 8000, "index_dir": "./data/index"},
@@ -50,12 +50,12 @@ class AppConfig:
     top_k: int = 5
     filters: dict = field(default_factory=dict)
     # generate - llm
-    llm_provider: str = "ollama"
-    llm_model: str = "qwen2.5"
-    llm_base_url: str = "http://localhost:11434"
+    llm_provider: str = "minimax"
+    llm_model: str = "MiniMax-M3"
+    llm_base_url: str = "https://api.MiniMax.chat/v1/"
     # generate - embedding
-    embedding_provider: str = "ollama"
-    embedding_model: str = "nomic-embed-text"
+    embedding_provider: str = "zhipu"
+    embedding_model: str = "embedding-3"
     defined_check_pattern: str = ""
     # web
     web_host: str = "127.0.0.1"
@@ -145,11 +145,11 @@ def _flatten(merged: dict) -> AppConfig:
         ingest_full=bool(i.get("full", True)),
         top_k=int(r.get("top_k", 5)),
         filters=dict(r.get("filters", {}) or {}),
-        llm_provider=str(llm.get("provider", "ollama")),
-        llm_model=str(llm.get("model", "qwen2.5")),
-        llm_base_url=str(llm.get("base_url", "http://localhost:11434")),
-        embedding_provider=str(em.get("provider", "ollama")),
-        embedding_model=str(em.get("model", "nomic-embed-text")),
+        llm_provider=str(llm.get("provider", "minimax")),
+        llm_model=str(llm.get("model", "MiniMax-M3")),
+        llm_base_url=str(llm.get("base_url", "https://api.MiniMax.chat/v1/")),
+        embedding_provider=str(em.get("provider", "zhipu")),
+        embedding_model=str(em.get("model", "embedding-3")),
         defined_check_pattern=str(g.get("defined_check_pattern", "")),
         web_host=str(w.get("host", "127.0.0.1")),
         web_port=int(w.get("port", 8000)),

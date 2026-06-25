@@ -12,9 +12,9 @@ vault:
 # 这里只列最常用的一组；其余字段（chunk_size / top_k 等）走内置默认
 generate:
   llm:
-    provider: "openai"
-    model: "gpt-4o-mini"
-    base_url: "https://api.openai.com/v1"
+    provider: "minimax"
+    model: "MiniMax-M3"
+    base_url: "https://api.MiniMax.chat/v1/"
   embedding:
-    provider: "openai"
-    model: "text-embedding-3-small"
+    provider: "zhipu"
+    model: "embedding-3"
