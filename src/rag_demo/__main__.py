@@ -21,7 +21,29 @@ from . import __version__
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
+    """MAQ-51: 用真实 embedder (从 cfg 构造) 跑 ingest, 而不是默认 stub 全 0 向量.
+
+    dim 由 embedder 实际一次 embed 探测出来 — 不同 provider 不同 dim
+    (openai text-embedding-3-small = 1536, zhipu embedding-3 = 2048, ...).
+    """
+    from .config import load_config
     from .ingest import ingest_directory
+    from .llm import build_embedder
+
+    cfg = load_config()
+    embedder = None
+    embedding_dim = int(args.embedding_dim) if getattr(args, "embedding_dim", 0) else 0
+    try:
+        embedder = build_embedder(cfg)
+        if embedding_dim == 0:
+            # 探测 dim — 1 次真实 API 调用
+            test_vec = embedder.embed_one("dim-probe")
+            embedding_dim = len(test_vec)
+            print(f"[ingest] detected embedding_dim={embedding_dim} from {cfg.embedding_provider}/{cfg.embedding_model}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ingest] 警告: 真 embedder 不可用, 退到 stub 全 0 向量 (dim=1536): {e}")
+        embedding_dim = 1536
+        embedder = None
 
     stats = ingest_directory(
         args.data,
@@ -29,6 +51,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         full=args.full,
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
+        embedder=embedder,
+        embedding_provider=cfg.embedding_provider,
+        embedding_model=cfg.embedding_model,
+        embedding_dim=embedding_dim,
     )
     print(
         f"ingested {stats.chunks_total} chunks from {stats.files_total} files "
@@ -200,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     p_ing.add_argument("--index", default="./data/index")
     p_ing.add_argument("--chunk-size", type=int, default=500)
     p_ing.add_argument("--chunk-overlap", type=int, default=80)
+    p_ing.add_argument("--embedding-dim", type=int, default=0,
+                       help="embedding dim; 0 = 从 embedder 探测 (推荐, MAQ-51)")
     p_ing.add_argument("--full", dest="full", action="store_true", default=True)
     p_ing.add_argument("--incremental", dest="full", action="store_false")
     p_ing.set_defaults(func=_cmd_ingest)

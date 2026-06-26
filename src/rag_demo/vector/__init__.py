@@ -119,7 +119,11 @@ class VectorStore:
         )
 
     def load(self) -> VectorStore:
-        """从磁盘读 index + meta. 文件不存在时返回空 store (US4 早返路径)."""
+        """从磁盘读 index + meta. 文件不存在时返回空 store (US4 早返路径).
+
+        MAQ-51 (zhipu 适配): 当 self.dim == 0 (auto-detect), 用 index 自身的 dim;
+        否则按 self.dim 严格校验, 不一致 → AppError(503).
+        """
         index_path = self.index_dir / "faiss.index"
         meta_path = self.index_dir / "faiss_meta.json"
         if not index_path.exists() or not meta_path.exists():
@@ -134,6 +138,10 @@ class VectorStore:
                 http_status=503,
                 message=f"faiss_meta.json 损坏: {e}",
             ) from e
+        # auto-detect 路径: dim=0 表示不校验, 以 index 实际 dim 为准
+        if self.dim == 0:
+            self.dim = int(self._index.d)
+            return self
         if self._index.d != self.dim:
             raise AppError(
                 code="RETRIEVE_INDEX_MISSING",

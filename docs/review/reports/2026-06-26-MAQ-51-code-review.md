@@ -12,10 +12,17 @@ MAQ-51 报的"检索 0 分 + 问答 '找不到明确定义'"是两个**独立的
 1. **代码层（已修）**：`web/main.py` / `__main__._cmd_up` / `__main__._cmd_ask` 启动时**根本没实例化** `BaseLlmClient` / `BaseEmbedder`，所以 `retrieve()` 走 `embedder=None` 的 stub 分支（query 用全 0 向量），`generate._call_llm` 也走 stub（不调真 LLM）。这是 v1.2 真接入（MAQ-33~37）时**漏配的最后一段**。
 2. **数据层（环境阻塞）**：`data/index/manifest.json` 显示 `embedding_provider: "stub"`、`embedding_dim: 1536`，意味着 `data/index/faiss.index` 也是用全 0 向量构建的。即使第 1 点修了，没有真 API key 也**没法重建索引**。
 
-修完后：
+修完后（首轮提交 dfb1071）：
 - 158 测试全 pass（+11 覆盖本次修复的 wiring）
-- `scripts/eval_recall.py` 在 stub 模式 Recall@5 = 0.20（1/5，**不是 0**）
-- `scripts/eval_recall.py --real-embed` 走真 zhipu，但 `.env` 里 `ZHIPU_API_KEY` 被服务端判 401 过期 → 用户需刷新 key
+- `scripts/eval_recall.py` (stub) → **Recall@5 = 0.20 (1/5)，不再是 0** ✓
+- `scripts/eval_recall.py --real-embed` → 阻塞：`.env` 里 `ZHIPU_API_KEY` 被服务端判 401 过期 → owner 需刷新 key
+
+**二轮验证（owner 刷 key 后）**：
+- `data/index/` 用真 zhipu embedding-3 重建完成：`223 chunks, embedding_dim=2048, provider=zhipu`（`manifest.json` 已更新）
+- `scripts/eval_recall.py --real-embed --index-dir data/index` → 真 Recall@5 scores 区间 0.26–0.32（**全部非 0**，embedding 通）；默认 5 条样例 Recall@5 = 0% 是因为样例是给 sample 数据（微服务治理 / 冷启动 / LLM Provider）写的，跟 `余华活着.txt` 语义不相关
+- 自建 `data/eval_novel.json`（5 条关于福贵 / 家珍 / 有庆 / 凤霞 / 二喜苦根）→ **Recall@5 = 100% (5/5)** ✓
+- 端到端 Q&A：top score 0.55，`generate.answer(..., defined_checker=lambda q,h: True)` → decision=GENERATED，1922 字符真 LLM 回答（含 thinking block）→ **真 LLM 也通了**
+- 测试套件 158 passed 仍稳，+ 新增 3 处 dim 兼容性修复（`VectorStore.load` auto-detect dim=0、`retrieve()` 默认 dim=0、`_cmd_ingest` 从 embedder 探测 dim）
 
 ## 根因分析
 
@@ -153,7 +160,7 @@ $ uv run python scripts/eval_recall.py --real-embed
 # 401: 令牌已过期或验证不正确
 ```
 
-`.env` 里 `ZHIPU_API_KEY=sk-a2cdf50f66e140c285c3a94bdba8cbaf` 被 zhipu 服务端判 expired。同样试了 `MIMAX_API_KEY`（model "embo-01" 不识别）和 `MIMO_API_KEY`（endpoint 连不上）都不通。**生产索引重建 + 真 embedding eval 都被这个阻塞**。
+`.env` 里 `ZHIPU_API_KEY` 被 zhipu 服务端判 expired（key 已 redact，避免明文落到 git 历史）。同样试了 `MIMAX_API_KEY`（model "embo-01" 不识别）和 `MIMO_API_KEY`（endpoint 连不上）都不通。**生产索引重建 + 真 embedding eval 都被这个阻塞**。
 
 ## 给 owner / 后续接手
 
