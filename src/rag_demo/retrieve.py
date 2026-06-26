@@ -21,6 +21,20 @@ from .llm import BaseEmbedder
 from .vault_uri import encode as vault_uri_encode
 from .vector import VectorStore
 
+# 模块级 embedder 单例 — 由 web/__main__ 启动时 set_embedder() 注入
+# (MAQ-51: 之前 retrieve() 默认 embedder=None → 全 0 向量, 检索永远 0 分)
+_embedder: BaseEmbedder | None = None
+
+
+def set_embedder(emb: BaseEmbedder | None) -> None:
+    """注入 embedder. None 表示 stub 模式 (smoke)."""
+    global _embedder
+    _embedder = emb
+
+
+def get_embedder() -> BaseEmbedder | None:
+    return _embedder
+
 
 @dataclass(frozen=True)
 class Hit:
@@ -48,7 +62,7 @@ def retrieve(
     filters: dict | None = None,
     embedder: BaseEmbedder | None = None,
     vault_name: str = "my-notes",
-    dim: int = 1536,
+    dim: int = 0,
 ) -> list[Hit]:
     """真向量检索. 返回 Top-K 命中.
 
@@ -59,17 +73,22 @@ def retrieve(
         filters: v1 透传不强制实现 (预留 §3.2 F11).
         embedder: 注入的 embedder 实例 (None 时用 dummy 全 0 向量, 仅供 smoke).
         vault_name: 用于 vault:// 协议的 {vault} 占位 (默认 "my-notes").
-        dim: 向量维度 (默认 1536 兼容 OpenAI text-embedding-3-small).
+        dim: 向量维度; 0 表示从 index 自动检测 (推荐, 支持任意 provider).
+             显式给值时, 必须与 index 实际 dim 一致, 否则 AppError(503).
     """
     _ = filters  # v1 透传, 不强制
     index_path = Path(index_dir)
     store = VectorStore(index_dir=index_path, dim=dim).load()
     if store.is_empty():
         return []
-    # 真实 query embed
+    # MAQ-51: load() 后 store.dim 是 index 实际 dim (auto-detect 时已更新)
+    effective_dim = store.dim
+    # 真实 query embed — 优先用显式注入, 否则回落模块级单例 (MAQ-51)
+    if embedder is None:
+        embedder = _embedder
     if embedder is None:
         # smoke 路径: 全 0 向量, 必然搜不到 (US4 等价路径, 返 [])
-        query_vec = [0.0] * dim
+        query_vec = [0.0] * effective_dim
     else:
         query_vec = embedder.embed_one(query)
     raw_hits = store.search(query_vec, top_k=top_k)

@@ -21,7 +21,29 @@ from . import __version__
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
+    """MAQ-51: 用真实 embedder (从 cfg 构造) 跑 ingest, 而不是默认 stub 全 0 向量.
+
+    dim 由 embedder 实际一次 embed 探测出来 — 不同 provider 不同 dim
+    (openai text-embedding-3-small = 1536, zhipu embedding-3 = 2048, ...).
+    """
+    from .config import load_config
     from .ingest import ingest_directory
+    from .llm import build_embedder
+
+    cfg = load_config()
+    embedder = None
+    embedding_dim = int(args.embedding_dim) if getattr(args, "embedding_dim", 0) else 0
+    try:
+        embedder = build_embedder(cfg)
+        if embedding_dim == 0:
+            # 探测 dim — 1 次真实 API 调用
+            test_vec = embedder.embed_one("dim-probe")
+            embedding_dim = len(test_vec)
+            print(f"[ingest] detected embedding_dim={embedding_dim} from {cfg.embedding_provider}/{cfg.embedding_model}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ingest] 警告: 真 embedder 不可用, 退到 stub 全 0 向量 (dim=1536): {e}")
+        embedding_dim = 1536
+        embedder = None
 
     stats = ingest_directory(
         args.data,
@@ -29,6 +51,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         full=args.full,
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
+        embedder=embedder,
+        embedding_provider=cfg.embedding_provider,
+        embedding_model=cfg.embedding_model,
+        embedding_dim=embedding_dim,
     )
     print(
         f"ingested {stats.chunks_total} chunks from {stats.files_total} files "
@@ -38,8 +64,19 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    from .generate import answer
-    from .retrieve import retrieve
+    from .config import load_config
+    from .generate import answer, set_llm_client
+    from .llm import build_embedder, build_llm_client
+    from .retrieve import retrieve, set_embedder
+
+    # 启动期注入真 client / embedder (MAQ-51: 之前没注入, 全走 stub 路径 → 0 分)
+    cfg = load_config()
+    try:
+        set_embedder(build_embedder(cfg))
+        set_llm_client(build_llm_client(cfg))
+    except Exception as e:  # noqa: BLE001 - 顶层 CLI 兜底
+        print(f"[ask] 注入 LLM/embedder 失败: {e}")
+        return 2
 
     # 旧调用 `answer(args.question, hits)` 仍合法: defined_checker 走默认
     hits = retrieve(args.question, index_dir=args.index, top_k=args.top_k)
@@ -120,6 +157,26 @@ def _cmd_up(args: argparse.Namespace) -> int:
     data_dir = cfg.vault_path or data_dir
     index_dir = cfg.index_dir or index_dir
 
+    # step 1.5 (MAQ-51): 注入真 LLM client + embedder 到 generate / retrieve 单例
+    # 之前 web 启动后 retrieve 永远用全 0 向量 → 0 分
+    from .generate import set_llm_client
+    from .llm import build_embedder, build_llm_client
+    from .retrieve import set_embedder
+
+    try:
+        set_embedder(build_embedder(cfg))
+        set_llm_client(build_llm_client(cfg))
+        print(
+            f"[up] LLM ready: provider={cfg.llm_provider} model={cfg.llm_model} "
+            f"key_env={cfg.llm_api_key_env}"
+        )
+        print(
+            f"[up] embedder ready: provider={cfg.embedding_provider} "
+            f"model={cfg.embedding_model} key_env={cfg.embedding_api_key_env}"
+        )
+    except Exception as e:  # noqa: BLE001 - 启动期缺 key 时也要让 web 起来再 401
+        print(f"[up] LLM/embedder 未就绪 (启动后续请求将 401): {e}")
+
     stop_event = threading.Event()
 
     def _handle_signal(signum: int, _frame: object) -> None:
@@ -169,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     p_ing.add_argument("--index", default="./data/index")
     p_ing.add_argument("--chunk-size", type=int, default=500)
     p_ing.add_argument("--chunk-overlap", type=int, default=80)
+    p_ing.add_argument("--embedding-dim", type=int, default=0,
+                       help="embedding dim; 0 = 从 embedder 探测 (推荐, MAQ-51)")
     p_ing.add_argument("--full", dest="full", action="store_true", default=True)
     p_ing.add_argument("--incremental", dest="full", action="store_false")
     p_ing.set_defaults(func=_cmd_ingest)

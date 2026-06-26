@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time  # 用于 SSE cost_ms.retrieve / cost_ms.generate 计时 (NB1)
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,10 +30,41 @@ from ..retrieve import retrieve
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """FastAPI lifespan (MAQ-51): 启动时注入 LLM client + embedder 单例.
+
+    兜底 — 正常路径下 `__main__._cmd_up` 已经在 uvicorn.run() 之前注入过.
+    这里只处理: uvicorn 直接跑 `rag_demo.web.main:app` (没经 `__main__`) 的场景.
+    """
+    import logging
+
+    from ..config import get_config as _cached_config_for_startup
+    from ..generate import get_llm_client, set_llm_client
+    from ..llm import build_embedder, build_llm_client
+    from ..retrieve import get_embedder, set_embedder
+
+    log = logging.getLogger("rag_demo.web")
+    cfg = _cached_config_for_startup()
+    if get_llm_client() is None:
+        try:
+            set_llm_client(build_llm_client(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("LLM client 未注入: %s", e)
+    if get_embedder() is None:
+        try:
+            set_embedder(build_embedder(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("embedder 未注入: %s", e)
+    yield
+
+
 app = FastAPI(
     title="rag-demo",
     version="0.1.0",
     description="本地知识库问答 — Knowledge-Base QA (design §3.6)",
+    lifespan=_lifespan,
 )
 
 
@@ -323,6 +355,10 @@ def usage_query() -> dict[str, Any]:
         if ev.get("event") == "cold_start_abandoned":
             abandoned += 1
     return {"events_today": n, "abandoned_cold_starts": abandoned}
+
+
+# ── 启动钩子: 注入 LLM client + embedder 单例 (MAQ-51) ──────────
+# 已在 lifespan 中实现 — 见上方 _lifespan()
 
 
 # ── 静态文件 ────────────────────────────────────────────────
