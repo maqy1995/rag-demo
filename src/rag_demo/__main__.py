@@ -115,22 +115,39 @@ def _start_bg_ingest(
     index_dir: str,
     *,
     ingest_fn: Callable[..., object] | None = None,
+    embedder: object | None = None,
+    embedding_provider: str = "stub",
+    embedding_model: str = "stub",
+    embedding_dim: int = 1536,
 ) -> threading.Thread:
     """启动后台 ingest 线程, 返回 Thread 对象 (daemon=False).
 
     daemon=False 让 finally.join(timeout) 真的能等到线程跑完 —
     design §3.7 5 步流程第 4 步"优雅退出"的要求.
     测试可注入 ingest_fn 模拟慢 ingest.
+
+    MAQ-51 (live 回归修复): `embedder` / `embedding_provider` / `embedding_model`
+    / `embedding_dim` 必须由 `_cmd_up` 显式注入 (从 cfg + 真 embedder 探测),
+    否则会走 `ingest_directory` 默认 stub 全 0 向量, 把主人手动重建的真索引
+    覆盖回 stub — owner 跑 `rag-demo up` 启动 web 时这条线程就跑了一轮 stub
+    ingest, 把 2048-dim zhipu 索引覆盖成 1536-dim stub, 导致 live search 全 503.
     """
     if ingest_fn is None:
         from .ingest import ingest_directory as ingest_fn
 
     def _bg_ingest() -> None:
         try:
-            stats = ingest_fn(data_dir, index_dir, full=True)
+            stats = ingest_fn(
+                data_dir, index_dir, full=True,
+                embedder=embedder,
+                embedding_provider=embedding_provider,
+                embedding_model=embedding_model,
+                embedding_dim=embedding_dim,
+            )
             print(
                 f"[up] ingest done: state={stats.state} "
-                f"files={stats.files_total} chunks={stats.chunks_total}"
+                f"files={stats.files_total} chunks={stats.chunks_total} "
+                f"provider={embedding_provider} dim={embedding_dim}"
             )
         except FileNotFoundError as e:
             print(f"[up] ingest skipped (data dir missing): {e}")
@@ -177,6 +194,24 @@ def _cmd_up(args: argparse.Namespace) -> int:
     except Exception as e:  # noqa: BLE001 - 启动期缺 key 时也要让 web 起来再 401
         print(f"[up] LLM/embedder 未就绪 (启动后续请求将 401): {e}")
 
+    # MAQ-51 (live 回归): 后台 ingest 也必须用同一 embedder — 否则会把主人
+    # 手动重建的真索引覆盖回 stub. 这里 probe 一次拿 dim, 传给 bg ingest.
+    bg_embedder = None
+    bg_provider = cfg.embedding_provider
+    bg_model = cfg.embedding_model
+    bg_dim = 1536  # 兜底 (zhipu/openai probe 失败时降级)
+    try:
+        from .llm import build_embedder as _build_emb
+        bg_embedder = _build_emb(cfg)
+        bg_probe = bg_embedder.embed_one("dim-probe")
+        bg_dim = len(bg_probe)
+    except Exception as e:  # noqa: BLE001 - 缺 key 时让 bg ingest 走 stub 也行
+        print(f"[up] bg ingest embedder probe 失败, 降级 stub: {e}")
+        bg_embedder = None
+        bg_provider = "stub"
+        bg_model = "stub"
+        bg_dim = 1536
+
     stop_event = threading.Event()
 
     def _handle_signal(signum: int, _frame: object) -> None:
@@ -188,10 +223,17 @@ def _cmd_up(args: argparse.Namespace) -> int:
     # step 2: 后台 ingest 线程 (NB4: daemon=False)
     ingest_thread: threading.Thread | None = None
     if not args.no_ingest:
-        ingest_thread = _start_bg_ingest(data_dir, index_dir)
+        ingest_thread = _start_bg_ingest(
+            data_dir, index_dir,
+            embedder=bg_embedder,
+            embedding_provider=bg_provider,
+            embedding_model=bg_model,
+            embedding_dim=bg_dim,
+        )
         ingest_thread.start()
         print(
-            f"[up] background ingest started: data={data_dir} index={index_dir}"
+            f"[up] background ingest started: data={data_dir} index={index_dir} "
+            f"provider={bg_provider} dim={bg_dim}"
         )
 
     # step 3: uvicorn.run

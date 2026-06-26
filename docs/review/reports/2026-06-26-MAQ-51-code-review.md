@@ -24,6 +24,56 @@ MAQ-51 报的"检索 0 分 + 问答 '找不到明确定义'"是两个**独立的
 - 端到端 Q&A：top score 0.55，`generate.answer(..., defined_checker=lambda q,h: True)` → decision=GENERATED，1922 字符真 LLM 回答（含 thinking block）→ **真 LLM 也通了**
 - 测试套件 158 passed 仍稳，+ 新增 3 处 dim 兼容性修复（`VectorStore.load` auto-detect dim=0、`retrieve()` 默认 dim=0、`_cmd_ingest` 从 embedder 探测 dim）
 
+**三轮验证（live regression 修复 — 研发主管反馈 owner 实际 web 仍 0 结果）**：
+
+> 研发主管指出：前两轮 158 passed 是**离线**测试（pytest + eval_recall.py 直接调函数），跟 owner 实际跑 `rag-demo up` + 浏览器的 live 路径**不是同一条**。实测发现 live `/api/search` 返 `RETRIEVE_INDEX_MISSING: query dim 2048 != index dim 1536` — 我的修复没覆盖**最后一段 glue**。
+
+**第三根因（live regression）**：
+
+`__main__._cmd_up` 启动 web 时同时跑了一个**后台 ingest 线程**（`_start_bg_ingest`，design §3.7 NB4），这条线程调 `ingest_fn(data_dir, index_dir, full=True)`——**直接用 `ingest_directory` 默认 stub embedder**，跟我前面修复的 web / `_cmd_ingest` 完全脱节。结果：
+1. owner 手动跑 `uv run rag-demo ingest --data ... --index ./data/index` → 写入 2048-dim zhipu 索引
+2. owner 跑 `rag-demo up`（没带 `--no-ingest`）→ 后台线程立即启动，**几秒内把主人刚 build 的 2048-dim zhipu 索引覆盖成 1536-dim stub**
+3. 浏览器 / curl 进来 → `/api/search` 走 `retrieve()` → embedder 真 query 2048-dim → store 1536-dim → `RETRIEVE_INDEX_MISSING` 503
+4. 0 结果 + 问答无效
+
+**fix**：
+- `_start_bg_ingest` 加 4 个 kwarg: `embedder` / `embedding_provider` / `embedding_model` / `embedding_dim`
+- `_cmd_up` 在启动 web 之前**和**启动 bg 之前，用同一个 `build_embedder(cfg)` 拿到 embedder（probe dim 一次），再传给 `_start_bg_ingest`
+- 缺 key 时降级 stub（不阻断 web 启动），但 bg ingest 仍把 stub 标到 manifest — 主人刷新 key 后下次启动就会用真 embedder
+
+**三轮 e2e 验证（真 uvicorn subprocess 调 API）**：
+
+```
+$ uv run pytest -m e2e tests/test_live_e2e.py -v
+test_start_bg_ingest_calls_ingest_with_real_embedder PASSED  ← 单测: 验证 bg ingest 拿到真 embedder
+test_start_bg_ingest_thread_completes                  PASSED  ← 单测: 线程能正常 join
+test_live_search_against_real_index                    PASSED  ← live curl /api/search
+test_live_chat_against_real_index                      PASSED  ← live curl /api/chat
+
+4 passed in 2.64s
+```
+
+`tests/test_live_e2e.py` 新增 4 个 e2e 用例（MAQ-51 标注 `-m e2e`）：
+- 单元级 2 条：mock `ingest_directory`，断言 bg 线程收到 `embedder=fake_embedder` + `embedding_provider="zhipu"` + `embedding_dim=2048`（不是 None / "stub" / 1536）
+- live curl 2 条：真 `python -m uvicorn rag_demo.web.main:app` 起子进程，requests.post 调 `/api/search` / `/api/chat`，断言 200 + 真 hits（不是 503）
+
+**owner 现场复跑结果**：
+```
+$ curl http://localhost:8000/api/health
+{"ok":true}
+
+$ curl -X POST http://localhost:8000/api/search \
+    -H "Content-Type: application/json" \
+    -d '{"query":"有庆是怎么死的","top_k":2}'
+hits: 2
+  score=0.5696 chunk_id=147
+    snippet: ，又真是我的儿子。我哭了又哭，都不知道有庆的体育教师也来了。…有庆是抽血被抽死的…
+  score=0.5393 chunk_id=149
+    snippet: 你长高长胖了。…福贵，我还以为你死了…
+```
+
+manifest 在 bg ingest 跑完后仍是 `{provider: "zhipu", model: "embedding-3", dim: 2048, chunks: 223}` — **没被覆盖**。
+
 ## 根因分析
 
 ### 信号 1: 检索全部 score=0
@@ -183,13 +233,16 @@ $ uv run python scripts/eval_recall.py --real-embed
 - `src/rag_demo/llm/factory.py` — **新增** factory
 - `src/rag_demo/retrieve.py` — 模块级 `set_embedder` / `get_embedder` + 回落
 - `src/rag_demo/web/main.py` — FastAPI lifespan 注入
-- `src/rag_demo/__main__.py` — `_cmd_up` / `_cmd_ask` 启动期注入
+- `src/rag_demo/__main__.py` — `_cmd_up` / `_cmd_ask` / `_start_bg_ingest` 启动期注入 + 透传 embedder
+- `src/rag_demo/vector/__init__.py` — `load()` 支持 `dim=0` auto-detect
 - `scripts/eval_recall.py` — `--real-embed` 开关
 - `config.example.yaml` / `config.yaml` — 补 `api_key_env` / `embedding.base_url`
 - `tests/test_retrieve.py` — `set_embedder` 单例回落 + 显式优先（2 用例）
 - `tests/test_llm_factory.py` — **新增** 5 用例
 - `tests/test_web.py` — lifespan 注入 + 缺 key 兜底（2 用例）
 - `tests/test_main.py` — **新增** `_cmd_up` 注入 + 缺 key 兜底（2 用例）
+- `tests/test_live_e2e.py` — **新增** 4 用例（live regression 防线: bg ingest embedder 透传 + uvicorn subprocess curl /api/search /api/chat）
+- `data/eval_novel.json` — **新增** 自建小说 5 条样例（owner 真实 vault 用）
 
 ## 后续 follow-up（v1.3+）
 
