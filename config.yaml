@@ -4,8 +4,8 @@
 
 # 空 vault → cold-start 自动 fallback 到 data/raw.sample/ 5 篇
 vault:
-  path: ""
-  name: "my-notes"
+  path: "/Users/maqy/code/data"
+  name: "huozhe"
   include_extensions: [".md", ".txt"]
 
 # provider 列表见 docs/adr/0003-llm-embedding-source.md

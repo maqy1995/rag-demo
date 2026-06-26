@@ -375,3 +375,86 @@ def test_apperror_returns_json_response(client: TestClient) -> None:
     assert body["error"]["code"] == "GENERATE_LLM_FAIL"
     assert body["error"]["message"] == "LLM 调用失败"
     assert body["error"]["stage"] == "generate"
+
+
+# ── MAQ-51: lifespan 启动钩子注入 LLM client + embedder ──────────
+
+
+def test_lifespan_injects_llm_and_embedder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAQ-51: web FastAPI lifespan 启动时构造真 client/embedder 并 set_* 注入.
+
+    修复前: web 启动后 retrieve() 拿到 embedder=None → 全 0 向量 → 0 分.
+    修复后: lifespan 跑 build_llm_client + build_embedder, 模块级单例被填充.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MIMAX_API_KEY", "test-key")
+    monkeypatch.setenv("ZHIPU_API_KEY", "test-key")
+    # 阻断 load_dotenv 向上找到项目根的 .env (find_dotenv 会向上 walk)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    from rag_demo.config import _reset_config_cache
+    _reset_config_cache()
+    (tmp_path / "config.yaml").write_text(
+        "generate:\n  llm: {provider: minimax, model: MiniMax-M3, "
+        "base_url: https://api.MiniMax.chat/v1/, api_key_env: MIMAX_API_KEY}\n"
+        "  embedding: {provider: zhipu, model: embedding-3, "
+        "base_url: https://open.bigmodel.cn/api/paas/v4/, api_key_env: ZHIPU_API_KEY}\n",
+        encoding="utf-8",
+    )
+    _reset_config_cache()
+
+    # 重置模块级单例 (上一个测试可能注入过)
+    from rag_demo.generate import set_llm_client
+    from rag_demo.retrieve import set_embedder
+    set_llm_client(None)
+    set_embedder(None)
+
+    with TestClient(app) as c:  # lifespan 触发
+        # 确认 LLM client + embedder 都已被注入
+        from rag_demo.generate import get_llm_client
+        from rag_demo.retrieve import get_embedder
+        assert get_llm_client() is not None
+        assert get_embedder() is not None
+
+    # 测试结束清理 (避免污染下一个测试)
+    set_llm_client(None)
+    set_embedder(None)
+
+
+def test_lifespan_skips_inject_when_keys_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAQ-51: 缺 api_key 时 lifespan 不抛错 — web 仍然能起, 后续请求 401."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MIMAX_API_KEY", raising=False)
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    # 阻断 load_dotenv 向上找到项目根的 .env (find_dotenv 会向上 walk)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    from rag_demo.config import _reset_config_cache
+    _reset_config_cache()
+    (tmp_path / "config.yaml").write_text(
+        "generate:\n  llm: {provider: minimax, model: MiniMax-M3, "
+        "base_url: https://api.MiniMax.chat/v1/, api_key_env: MIMAX_API_KEY}\n"
+        "  embedding: {provider: zhipu, model: embedding-3, "
+        "base_url: https://open.bigmodel.cn/api/paas/v4/, api_key_env: ZHIPU_API_KEY}\n",
+        encoding="utf-8",
+    )
+    _reset_config_cache()
+
+    from rag_demo.generate import set_llm_client
+    from rag_demo.retrieve import set_embedder
+    set_llm_client(None)
+    set_embedder(None)
+
+    with TestClient(app) as c:
+        from rag_demo.generate import get_llm_client
+        from rag_demo.retrieve import get_embedder
+        # 缺 key 时不注入 (lifespan 内部 try/except 兜住)
+        assert get_llm_client() is None
+        assert get_embedder() is None
+
+    set_llm_client(None)
+    set_embedder(None)

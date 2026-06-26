@@ -21,6 +21,7 @@ from .base import (
     EmbedConfig,
     LLMConfig,
 )
+from .factory import build_embedder, build_llm_client
 from .openai_compat import OpenAICompatibleClient, OpenAICompatibleEmbedder
 
 __all__ = [
@@ -31,4 +32,6 @@ __all__ = [
     "LLMConfig",
     "OpenAICompatibleClient",
     "OpenAICompatibleEmbedder",
+    "build_embedder",
+    "build_llm_client",
 ]

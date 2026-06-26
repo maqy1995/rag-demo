@@ -129,3 +129,61 @@ def test_retrieve_real_embedder_integration(tmp_path):
         hits = retrieve("alpha", index_dir=tmp_path, top_k=1, embedder=emb, dim=4)
     assert len(hits) == 1
     assert hits[0].file == "a.md"
+
+
+def test_retrieve_uses_module_level_embedder_when_not_passed(tmp_path):
+    """MAQ-51: retrieve() 不传 embedder 时回落模块级单例 (set_embedder 注入的).
+
+    之前 default embedder=None → 全 0 向量 → 0 分. 修复后: 启动期 set_embedder
+    把真 embedder 注入, retrieve() 不传参时也能用它, 分数不再 0.
+    """
+    from rag_demo.retrieve import set_embedder, get_embedder
+
+    _make_index(tmp_path)
+
+    class _FakeEmb:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+        def embed(self, texts):
+            self.calls.extend(texts)
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+        def embed_one(self, text):
+            self.calls.append(text)
+            return [1.0, 0.0, 0.0, 0.0]
+
+    fake = _FakeEmb()
+    set_embedder(fake)
+    try:
+        # 不传 embedder — 应该回落模块级单例
+        hits = retrieve("anything", index_dir=tmp_path, top_k=2, dim=4)
+        assert len(hits) == 2
+        assert hits[0].file == "a.md"
+        assert hits[0].score > hits[1].score
+        # 确认 fake embedder 真的被调了 (不是全 0 向量路径)
+        assert fake.calls == ["anything"]
+    finally:
+        set_embedder(None)  # 不污染后续测试
+    assert get_embedder() is None
+
+
+def test_retrieve_explicit_embedder_overrides_module_level(tmp_path):
+    """MAQ-51: 显式 embedder 优先于模块级单例 (业务可临时覆盖)."""
+    from rag_demo.retrieve import set_embedder
+
+    _make_index(tmp_path)
+
+    class _Global:
+        def embed(self, texts): return [[0.0, 1.0, 0.0, 0.0] for _ in texts]
+        def embed_one(self, t): return [0.0, 1.0, 0.0, 0.0]
+
+    class _Local:
+        def embed(self, texts): return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+        def embed_one(self, t): return [1.0, 0.0, 0.0, 0.0]
+
+    set_embedder(_Global())
+    try:
+        # 显式传 _Local — 应该用 _Local (a.md), 不是 _Global (b.md)
+        hits = retrieve("q", index_dir=tmp_path, top_k=1, embedder=_Local(), dim=4)
+        assert hits[0].file == "a.md"
+    finally:
+        set_embedder(None)

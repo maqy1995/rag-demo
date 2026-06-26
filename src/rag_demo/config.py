@@ -24,12 +24,43 @@ _DEFAULTS: dict[str, Any] = {
     "ingest": {"chunk_size": 500, "chunk_overlap": 80, "full": True},
     "retrieve": {"top_k": 5, "filters": {}},
     "generate": {
-        "llm": {"provider": "minimax", "model": "MiniMax-M3", "base_url": "https://api.MiniMax.chat/v1/"},
-        "embedding": {"provider": "zhipu", "model": "embedding-3"},
+        "llm": {
+            "provider": "minimax",
+            "model": "MiniMax-M3",
+            "base_url": "https://api.MiniMax.chat/v1/",
+            "api_key_env": "MIMAX_API_KEY",
+            "timeout_s": 30.0,
+            "max_retries": 2,
+        },
+        "embedding": {
+            "provider": "zhipu",
+            "model": "embedding-3",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+            "api_key_env": "ZHIPU_API_KEY",
+            "timeout_s": 30.0,
+            "batch_size": 64,
+        },
         "defined_check_pattern": "",
     },
     "web": {"host": "127.0.0.1", "port": 8000, "index_dir": "./data/index"},
     "usage": {"enabled": True, "dir": "./data/usage"},
+}
+
+# provider → env var 映射 (ADR-0003 表, 锁定)
+# 当 config.yaml 没显式给 api_key_env 时, 用这张表兜底.
+_PROVIDER_KEY_ENV: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "zhipu": "ZHIPU_API_KEY",
+    "minimax": "MIMAX_API_KEY",
+    "mimo": "MIMO_API_KEY",
+}
+# provider → 默认 base_url (embedding 没有 LLM 那边的 base_url 字段,
+# 显式 config.yaml::generate.embedding.base_url 为空时兜底用这张表)
+_PROVIDER_BASE_URL: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4/",
+    "minimax": "https://api.MiniMax.chat/v1/",
+    "mimo": "https://api.mimo.xiaomi.com/v1/",
 }
 
 
@@ -53,9 +84,16 @@ class AppConfig:
     llm_provider: str = "minimax"
     llm_model: str = "MiniMax-M3"
     llm_base_url: str = "https://api.MiniMax.chat/v1/"
+    llm_api_key_env: str = "MIMAX_API_KEY"
+    llm_timeout_s: float = 30.0
+    llm_max_retries: int = 2
     # generate - embedding
     embedding_provider: str = "zhipu"
     embedding_model: str = "embedding-3"
+    embedding_base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
+    embedding_api_key_env: str = "ZHIPU_API_KEY"
+    embedding_timeout_s: float = 30.0
+    embedding_batch_size: int = 64
     defined_check_pattern: str = ""
     # web
     web_host: str = "127.0.0.1"
@@ -84,10 +122,13 @@ class AppConfig:
                     "provider": self.llm_provider,
                     "model": self.llm_model,
                     "base_url": self.llm_base_url,
+                    "api_key_env": self.llm_api_key_env,
                 },
                 "embedding": {
                     "provider": self.embedding_provider,
                     "model": self.embedding_model,
+                    "base_url": self.embedding_base_url,
+                    "api_key_env": self.embedding_api_key_env,
                 },
                 "defined_check_pattern": self.defined_check_pattern,
             },
@@ -148,8 +189,15 @@ def _flatten(merged: dict) -> AppConfig:
         llm_provider=str(llm.get("provider", "minimax")),
         llm_model=str(llm.get("model", "MiniMax-M3")),
         llm_base_url=str(llm.get("base_url", "https://api.MiniMax.chat/v1/")),
+        llm_api_key_env=str(llm.get("api_key_env") or _PROVIDER_KEY_ENV.get(str(llm.get("provider", "minimax")), "")),
+        llm_timeout_s=float(llm.get("timeout_s", 30.0)),
+        llm_max_retries=int(llm.get("max_retries", 2)),
         embedding_provider=str(em.get("provider", "zhipu")),
         embedding_model=str(em.get("model", "embedding-3")),
+        embedding_base_url=str(em.get("base_url") or _PROVIDER_BASE_URL.get(str(em.get("provider", "zhipu")), "")),
+        embedding_api_key_env=str(em.get("api_key_env") or _PROVIDER_KEY_ENV.get(str(em.get("provider", "zhipu")), "")),
+        embedding_timeout_s=float(em.get("timeout_s", 30.0)),
+        embedding_batch_size=int(em.get("batch_size", 64)),
         defined_check_pattern=str(g.get("defined_check_pattern", "")),
         web_host=str(w.get("host", "127.0.0.1")),
         web_port=int(w.get("port", 8000)),

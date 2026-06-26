@@ -38,8 +38,19 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    from .generate import answer
-    from .retrieve import retrieve
+    from .config import load_config
+    from .generate import answer, set_llm_client
+    from .llm import build_embedder, build_llm_client
+    from .retrieve import retrieve, set_embedder
+
+    # 启动期注入真 client / embedder (MAQ-51: 之前没注入, 全走 stub 路径 → 0 分)
+    cfg = load_config()
+    try:
+        set_embedder(build_embedder(cfg))
+        set_llm_client(build_llm_client(cfg))
+    except Exception as e:  # noqa: BLE001 - 顶层 CLI 兜底
+        print(f"[ask] 注入 LLM/embedder 失败: {e}")
+        return 2
 
     # 旧调用 `answer(args.question, hits)` 仍合法: defined_checker 走默认
     hits = retrieve(args.question, index_dir=args.index, top_k=args.top_k)
@@ -119,6 +130,26 @@ def _cmd_up(args: argparse.Namespace) -> int:
     cfg = load_config()
     data_dir = cfg.vault_path or data_dir
     index_dir = cfg.index_dir or index_dir
+
+    # step 1.5 (MAQ-51): 注入真 LLM client + embedder 到 generate / retrieve 单例
+    # 之前 web 启动后 retrieve 永远用全 0 向量 → 0 分
+    from .generate import set_llm_client
+    from .llm import build_embedder, build_llm_client
+    from .retrieve import set_embedder
+
+    try:
+        set_embedder(build_embedder(cfg))
+        set_llm_client(build_llm_client(cfg))
+        print(
+            f"[up] LLM ready: provider={cfg.llm_provider} model={cfg.llm_model} "
+            f"key_env={cfg.llm_api_key_env}"
+        )
+        print(
+            f"[up] embedder ready: provider={cfg.embedding_provider} "
+            f"model={cfg.embedding_model} key_env={cfg.embedding_api_key_env}"
+        )
+    except Exception as e:  # noqa: BLE001 - 启动期缺 key 时也要让 web 起来再 401
+        print(f"[up] LLM/embedder 未就绪 (启动后续请求将 401): {e}")
 
     stop_event = threading.Event()
 

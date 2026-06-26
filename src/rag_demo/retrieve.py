@@ -21,6 +21,20 @@ from .llm import BaseEmbedder
 from .vault_uri import encode as vault_uri_encode
 from .vector import VectorStore
 
+# 模块级 embedder 单例 — 由 web/__main__ 启动时 set_embedder() 注入
+# (MAQ-51: 之前 retrieve() 默认 embedder=None → 全 0 向量, 检索永远 0 分)
+_embedder: BaseEmbedder | None = None
+
+
+def set_embedder(emb: BaseEmbedder | None) -> None:
+    """注入 embedder. None 表示 stub 模式 (smoke)."""
+    global _embedder
+    _embedder = emb
+
+
+def get_embedder() -> BaseEmbedder | None:
+    return _embedder
+
 
 @dataclass(frozen=True)
 class Hit:
@@ -66,7 +80,9 @@ def retrieve(
     store = VectorStore(index_dir=index_path, dim=dim).load()
     if store.is_empty():
         return []
-    # 真实 query embed
+    # 真实 query embed — 优先用显式注入, 否则回落模块级单例 (MAQ-51)
+    if embedder is None:
+        embedder = _embedder
     if embedder is None:
         # smoke 路径: 全 0 向量, 必然搜不到 (US4 等价路径, 返 [])
         query_vec = [0.0] * dim
